@@ -380,6 +380,10 @@ class CarState(CarStateBase, CarStateExt):
   @staticmethod
   def get_can_parsers(CP, CP_SP):
     pt_messages = []
+    # Cars without MRCC stop broadcasting CRZ_CTRL a fixed ~19 s after ignition. Registering it
+    # explicitly as ignore_alive keeps that silence from invalidating the whole bus; the lazy
+    # registration behind cp.vl would otherwise give it a 10 s liveness window.
+    pt_messages.append(("CRZ_CTRL", float("nan")))
     if CP.openpilotLongitudinalControl:
       # Do not require liveness for frames intentionally absent after radar teardown.
       pt_messages.append(("CRZ_INFO", float("nan")))
