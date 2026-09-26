@@ -19,6 +19,8 @@ MADS_NO_ACC_MAIN_BUTTON = ("rivian", "tesla")
 def mads_button_owns_lateral(CP: structs.CarParams, CP_SP: structs.CarParamsSP) -> bool:
   """The driver declared a MADS button that is the only lateral switch: ACC main neither
   engages nor disengages, and unified engagement does not couple to it."""
+  if CP.carFingerprint == "MAZDA_CX5_2022_NON_MRCC":
+    return True
   return CP.brand == "mazda" and bool(CP_SP.flags & MazdaFlagsSP.TJA_BUTTON)
 
 
