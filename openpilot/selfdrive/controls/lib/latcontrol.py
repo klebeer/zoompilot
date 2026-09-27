@@ -2,13 +2,19 @@ import numpy as np
 from abc import abstractmethod, ABC
 from openpilot.selfdrive.locationd.helpers import Pose
 
+# The CX-5 without MRCC reaches its torque cap in town turns well below 36 km/h, where the car
+# then runs wide of the path without any warning.
+LOW_SPEED_SAT_CHECK = {
+  "MAZDA_CX5_2022_NON_MRCC": 10. / 3.6,
+}
+
 
 class LatControl(ABC):
   def __init__(self, CP, CP_SP, CI, dt):
     self.dt = dt
     self.sat_limit = CP.steerLimitTimer
     self.sat_time = 0.
-    self.sat_check_min_speed = 10.
+    self.sat_check_min_speed = LOW_SPEED_SAT_CHECK.get(str(CP.carFingerprint), 10.)
 
     # we define the steer torque scale as [-1.0...1.0]
     self.steer_max = 1.0
