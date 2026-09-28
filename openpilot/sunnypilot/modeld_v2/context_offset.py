@@ -21,6 +21,10 @@ MAX_EDGE_STD = 1.0
 CURB_MARGIN = 0.8   # m kept from the right road edge (parked cars, curb)
 MAX_SHIFT = 0.5     # m
 RATE = 0.05         # m/s
+# measured on the same car: with both lines the car rides centred below 50 km/h, close to oncoming
+# traffic, and 0.16 m right above 70 km/h, so the right bias is carried by speed, not CameraOffset
+TOWN_BIAS = 0.25    # m to the right
+TOWN_BIAS_SPEEDS = [50 / 3.6, 70 / 3.6]
 
 
 class ContextOffset:
@@ -28,11 +32,13 @@ class ContextOffset:
     self.enabled = fingerprint in PLATFORMS
     self.step = RATE * dt
     self.shift = 0.0   # m to the right, currently applied
+    self.bias = 0.0    # m to the right, from speed
 
   def update(self, model_v2, v_ego: float) -> float:
     """Advance toward the wanted shift from the latest model output. Returns metres to the right."""
     if not self.enabled:
       return 0.0
+    self.bias = float(np.interp(v_ego, TOWN_BIAS_SPEEDS, [TOWN_BIAS, 0.0]))
     target = 0.0
     if MIN_SPEED <= v_ego <= MAX_SPEED and len(model_v2.laneLines) >= 4 and len(model_v2.roadEdges) >= 2:
       probs, stds = model_v2.laneLineProbs, model_v2.roadEdgeStds
@@ -46,4 +52,4 @@ class ContextOffset:
 
   def camera_offset(self, base_offset: float) -> float:
     """CameraOffset moves the model centre left for positive values, so a right shift subtracts."""
-    return base_offset - self.shift
+    return base_offset - self.bias - self.shift

@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from openpilot.sunnypilot.modeld_v2.context_offset import MAX_SHIFT, ContextOffset
+from openpilot.sunnypilot.modeld_v2.context_offset import MAX_SHIFT, TOWN_BIAS, ContextOffset
 
 CX5 = "MAZDA_CX5_2022_NON_MRCC"
 TOWN = 30 / 3.6
@@ -51,5 +51,18 @@ def test_fades_back_when_the_line_reappears():
 def test_camera_offset_sign_and_other_cars():
   co = ContextOffset(CX5, 0.05)
   run(co, model(), TOWN, 30.0)
-  assert co.camera_offset(-0.10) == -0.10 - MAX_SHIFT
+  assert co.camera_offset(0.0) == -TOWN_BIAS - MAX_SHIFT
   assert run(ContextOffset("MAZDA_CX5_2022", 0.05), model(), TOWN, 30.0) == 0.0
+
+
+def test_town_bias_fades_out_with_speed():
+  co = ContextOffset(CX5, 0.05)
+  for kph, bias in ((30, TOWN_BIAS), (50, TOWN_BIAS), (60, TOWN_BIAS / 2), (70, 0.0), (100, 0.0)):
+    run(co, model(p_right=0.9), kph / 3.6, 0.05)
+    assert abs(co.camera_offset(0.0) + bias) < 1e-6, kph
+
+
+def test_no_town_bias_on_other_cars():
+  co = ContextOffset("MAZDA_CX5_2022", 0.05)
+  run(co, model(p_right=0.9), TOWN, 0.05)
+  assert co.camera_offset(0.0) == 0.0
