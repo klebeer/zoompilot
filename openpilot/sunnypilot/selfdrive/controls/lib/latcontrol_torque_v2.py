@@ -55,6 +55,17 @@ def get_roll_comp_scale(fingerprint: str, v_ego: float) -> float:
   return 1.0 if scale is None else float(np.interp(v_ego, ROLL_COMP_SCALE_SPEEDS, scale))
 
 
+# Below this speed the integrator is frozen. On the CX-5 without MRCC gentle curves at 10-20 km/h
+# reach only 0.58-0.72 of the requested curvature with torque to spare, so let it act from 10 km/h.
+INTEGRATOR_MIN_SPEED = {
+  "MAZDA_CX5_2022_NON_MRCC": 10 / 3.6,
+}
+
+
+def get_integrator_min_speed(fingerprint: str) -> float:
+  return INTEGRATOR_MIN_SPEED.get(fingerprint, 5.0)
+
+
 def get_center_chatter_jerk_deadzone(v_ego, setpoint):
   """Small-signal jerk deadzone for the friction input: full at lane center, gone above 0.35 m/s^2."""
   center_weight = np.interp(abs(setpoint), CENTER_CHATTER_JERK_DEADZONE_LAT_ACCEL_BP, CENTER_CHATTER_JERK_DEADZONE_LAT_ACCEL_V)
@@ -76,6 +87,7 @@ class LatControlTorque(LatControlTorqueV0):
     self.prev_steering_pressed = False
     self._release_error_ramp = 1.0
     self.fingerprint = str(CP.carFingerprint)
+    self.integrator_min_speed = get_integrator_min_speed(self.fingerprint)
     # Torque-space output overrides bypass v2 friction shaping and damping.
     cloudlog.info("LatControlTorque v2: extension output overrides (jerk-aware/NNLC) disabled")
     self.extension.disable_output_overrides()
@@ -138,7 +150,7 @@ class LatControlTorque(LatControlTorqueV0):
       ff += get_friction(friction_error, lateral_accel_deadzone, FRICTION_THRESHOLD, self.torque_params)
 
       # The shared limit classifier excludes integrator decay and the EPS authority rail.
-      freeze_integrator = steer_limited_by_safety or CS.steeringPressed or CS.vEgo < 5
+      freeze_integrator = steer_limited_by_safety or CS.steeringPressed or CS.vEgo < self.integrator_min_speed
       # Suppress derivative response to driver steering.
       error_rate = 0.0 if CS.steeringPressed else -measurement_rate
       if self.extension.overrides_output:
