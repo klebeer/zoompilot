@@ -41,6 +41,19 @@ RELEASE_ERROR_RAMP_T = 0.3  # s
 KD_INTERP_SPEEDS = [7.5, 10.0, 12.0, 14.5]  # m/s
 KD_INTERP = [1.65, 1.05, 0.85, 0.0]
 
+# On the CX-5 without MRCC, tracking in gentle curves below 40 km/h falls from 0.92 to 0.74 of
+# the requested curvature as roll compensation toward the turn grows past 0.35 m/s^2: the full
+# compensation removes more torque than the road gives back at these speeds.
+ROLL_COMP_SCALE_SPEEDS = [40 / 3.6, 52 / 3.6]  # m/s
+ROLL_COMP_SCALE = {
+  "MAZDA_CX5_2022_NON_MRCC": [0.5, 1.0],
+}
+
+
+def get_roll_comp_scale(fingerprint: str, v_ego: float) -> float:
+  scale = ROLL_COMP_SCALE.get(fingerprint)
+  return 1.0 if scale is None else float(np.interp(v_ego, ROLL_COMP_SCALE_SPEEDS, scale))
+
 
 def get_center_chatter_jerk_deadzone(v_ego, setpoint):
   """Small-signal jerk deadzone for the friction input: full at lane center, gone above 0.35 m/s^2."""
@@ -62,6 +75,7 @@ class LatControlTorque(LatControlTorqueV0):
     self.jerk_filter = FirstOrderFilter(0.0, 1 / (2 * np.pi * LP_FILTER_CUTOFF_HZ), self.dt)
     self.prev_steering_pressed = False
     self._release_error_ramp = 1.0
+    self.fingerprint = str(CP.carFingerprint)
     # Torque-space output overrides bypass v2 friction shaping and damping.
     cloudlog.info("LatControlTorque v2: extension output overrides (jerk-aware/NNLC) disabled")
     self.extension.disable_output_overrides()
@@ -95,7 +109,7 @@ class LatControlTorque(LatControlTorqueV0):
         self._release_error_ramp = 0.0
       self._release_error_ramp = min(1.0, self._release_error_ramp + self.dt / RELEASE_ERROR_RAMP_T)
 
-      roll_compensation = params.roll * ACCELERATION_DUE_TO_GRAVITY
+      roll_compensation = params.roll * ACCELERATION_DUE_TO_GRAVITY * get_roll_comp_scale(self.fingerprint, CS.vEgo)
       curvature_deadzone = abs(VM.calc_curvature(math.radians(self.steering_angle_deadzone_deg), CS.vEgo, 0.0))
       lateral_accel_deadzone = curvature_deadzone * CS.vEgo ** 2
 
