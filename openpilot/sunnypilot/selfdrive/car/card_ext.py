@@ -5,9 +5,18 @@ This file is part of zoompilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 """
 from opendbc.car import structs
+from opendbc.car.common.conversions import Conversions as CV
 from opendbc.sunnypilot.car.stock_ecu import StockEcuState
 from openpilot.common.params import Params
 from openpilot.sunnypilot.selfdrive.car.stock_ecu_handback import StockEcuHandBackServer
+
+# The resolved speed limit handed to car controllers that can draw it on the car's own HUD.
+HUD_SPEED_LIMIT_PARAM = "HudSpeedLimitKph"
+
+
+def hud_speed_limit_kph(long_plan_sp) -> int:
+  res = long_plan_sp.speedLimit.resolver
+  return round(res.speedLimit * CV.MS_TO_KPH) if res.speedLimitValid and res.speedLimit > 0 else 0
 
 
 class CardExt:
@@ -45,6 +54,9 @@ class CardExt:
     """Runs just before CI.apply on the converted CarControlSP struct, which it may edit."""
     self.v_cruise_helper.cruise_arbiter.gate_send_button(CC_SP)
     self.handback.update(CC.enabled, self.stock_ecu_state, CC_SP)
+    CC_SP.params = [p for p in CC_SP.params if p.key != HUD_SPEED_LIMIT_PARAM] + [structs.CarControlSP.Param(
+      key=HUD_SPEED_LIMIT_PARAM, value=str(hud_speed_limit_kph(self.sm['longitudinalPlanSP'])).encode(),
+      type=structs.CarControlSP.ParamType.int)]
     return CC_SP
 
   def update_params(self) -> None:
