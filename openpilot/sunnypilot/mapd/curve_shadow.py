@@ -1,9 +1,11 @@
 """
 Shadow run of the tight-curve warning: records where it would fire, never alerts.
 
-Runs onroad. While openpilot steers at MIN_KPH-MAX_KPH it applies curve_warning's rule to the
-latest mapd curvature points and appends one JSON line per would-be warning to LOG_DIR, stamped
-with time.monotonic_ns() so it joins the rlog on logMonoTime. Outcomes are judged offline.
+Runs onroad. While openpilot steers at MIN_KPH-MAX_KPH it applies two rules to the latest mapd
+curvature points: the map's tight-curve rule, and a list of curves learned from this driver's own
+logs (KNOWN_CURVES_PATH, written by commaia mapd/known_hard_curves.py). It appends one JSON line
+per would-be warning to LOG_DIR, stamped with time.monotonic_ns() so it joins the rlog on
+logMonoTime, and records which rules fired so the two can be compared offline. Neither alerts.
 """
 import json
 import math
@@ -13,9 +15,10 @@ import time
 import openpilot.cereal.messaging as messaging
 from openpilot.common.hardware import PC
 from openpilot.common.swaglog import cloudlog
-from openpilot.sunnypilot.mapd.curve_warning import LOOKAHEAD_M, MIN_RADIUS_M, distance_m, tight_curve_ahead
+from openpilot.sunnypilot.mapd.curve_warning import LOOKAHEAD_M, MIN_RADIUS_M, distance_m, known_curve_ahead, tight_curve_ahead
 
 SHM = "/dev/shm/params/d"
+KNOWN_CURVES_PATH = os.path.expanduser("~/.comma/known_hard_curves.json") if PC else "/data/known_hard_curves.json"
 LOG_DIR = os.path.expanduser("~/.comma/curve_shadow") if PC else "/data/media/0/curve_shadow"
 MIN_KPH, MAX_KPH = 10.0, 60.0
 HOLDOFF_S = 20.0            # at most one would-be warning every 20 s
@@ -32,18 +35,34 @@ def _read_json(key: str):
     return None
 
 
+def load_known_curves(path: str = KNOWN_CURVES_PATH) -> list[dict]:
+  """The learned curve list, or an empty list when it is absent or unreadable."""
+  try:
+    with open(path) as f:
+      curves = json.load(f)
+    return [c for c in curves if "latitude" in c and "longitude" in c]
+  except (OSError, ValueError, TypeError):
+    return []
+
+
 class Shadow:
-  def __init__(self):
+  def __init__(self, known_curves: list[dict] | None = None):
     self.last_warn_t = -1e9
     self.last_warn_point = None
+    self.known_curves = known_curves if known_curves is not None else load_known_curves()
 
   def step(self, now: float, lat_active: bool, v_kph: float, lat: float, lon: float, heading: float, curvatures, road):
     """The record to write when the rule fires on a new curve, else None."""
     if not lat_active or not (MIN_KPH <= v_kph <= MAX_KPH) or not curvatures:
       return None
     hit = tight_curve_ahead(lat, lon, heading, curvatures)
-    if hit is None:
+    learned = known_curve_ahead(lat, lon, heading, self.known_curves)
+    # The nearer of the two leads the record; "rules" says which would have fired on their own.
+    rules = [name for name, h in (("map", hit), ("learned", learned)) if h is not None]
+    if hit is None and learned is None:
       return None
+    if hit is None or (learned is not None and learned.distance < hit.distance):
+      hit = learned
     if now - self.last_warn_t < HOLDOFF_S:
       return None
     if self.last_warn_point is not None and now - self.last_warn_t < SAME_CURVE_HOLDOFF_S and \
@@ -53,8 +72,9 @@ class Shadow:
     self.last_warn_point = (hit.latitude, hit.longitude)
     return {"lat": lat, "lon": lon, "heading": round(heading, 1), "v_kph": round(v_kph, 1),
             "distance_m": round(hit.distance, 1), "radius_m": round(hit.radius, 1),
-            "curve_lat": hit.latitude, "curve_lon": hit.longitude, "road": road,
-            "rule": {"lookahead_m": LOOKAHEAD_M, "min_radius_m": MIN_RADIUS_M, "kph": [MIN_KPH, MAX_KPH]}}
+            "curve_lat": hit.latitude, "curve_lon": hit.longitude, "road": road, "rules": rules,
+            "rule": {"lookahead_m": LOOKAHEAD_M, "min_radius_m": MIN_RADIUS_M, "kph": [MIN_KPH, MAX_KPH],
+                     "known_curves": len(self.known_curves)}}
 
 
 def main() -> None:

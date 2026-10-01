@@ -34,6 +34,28 @@ def bearing_deg(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
   return math.degrees(math.atan2(y, x)) % 360
 
 
+def known_curve_ahead(lat: float, lon: float, heading_deg: float, curves: list[dict],
+                      lookahead_m: float = LOOKAHEAD_M) -> CurveAhead | None:
+  """Nearest curve ahead from a list learned off the driver's own logs, as CurveAhead with radius 0.
+
+  The map rule cannot see a turn onto another street, and it judges a curve the car may well
+  manage. These points are places where this car ran out of steering torque, ran wide or was taken
+  over, on more than one drive, so they carry no radius of their own.
+  """
+  best = None
+  for p in curves:
+    plat, plon = p["latitude"], p["longitude"]
+    d = distance_m(lat, lon, plat, plon)
+    if d > lookahead_m:
+      continue
+    off = abs((bearing_deg(lat, lon, plat, plon) - heading_deg + 180) % 360 - 180)
+    if off > MAX_BEARING_OFF_DEG:
+      continue
+    if best is None or d < best.distance:
+      best = CurveAhead(distance=d, radius=0.0, latitude=plat, longitude=plon)
+  return best
+
+
 def tight_curve_ahead(lat: float, lon: float, heading_deg: float, curvatures: list[dict],
                       lookahead_m: float = LOOKAHEAD_M, min_radius_m: float = MIN_RADIUS_M) -> CurveAhead | None:
   """Tightest mapd curvature point ahead within lookahead_m whose radius is below min_radius_m."""
