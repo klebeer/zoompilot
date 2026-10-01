@@ -183,6 +183,7 @@ procs += [
   PythonProcess("mapd_manager", "openpilot.sunnypilot.mapd.mapd_manager", always_run),
   PythonProcess("mapd_logger", "openpilot.sunnypilot.mapd.mapd_logger", and_(only_onroad, mapd_ready)),
   PythonProcess("curve_shadow", "openpilot.sunnypilot.mapd.curve_shadow", and_(only_onroad, mapd_ready)),
+  PythonProcess("lane_map_shadow", "openpilot.sunnypilot.mapd.lane_map_shadow", and_(only_onroad, mapd_ready)),
   PythonProcess("log_archiver", "openpilot.sunnypilot.system.log_archiver", only_offroad),
 
   # locationd
