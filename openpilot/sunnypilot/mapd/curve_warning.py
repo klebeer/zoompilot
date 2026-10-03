@@ -9,6 +9,13 @@ from dataclasses import dataclass
 
 LOOKAHEAD_M = 100.0
 MIN_RADIUS_M = 45.0
+# Open curves the steering holds only when slow: in 35-100 m of radius it reached its limit in 29% of
+# the curves entered at 20-30 km/h, 57% at 30-40 and all at 40-50 (commaia mapd/curve_capability.py).
+# The places come from this car's own drives: the map's curvature names too many curves that are not.
+ADVICE_KPH = 30.0
+ADVICE_MIN_RADIUS_M, ADVICE_MAX_RADIUS_M = 35.0, 100.0
+ADVICE_LOOKAHEAD_M = 120.0
+SAME_HEADING_DEG = 45.0
 MAX_BEARING_OFF_DEG = 90.0
 EARTH_RADIUS_M = 6371000.0
 
@@ -73,4 +80,24 @@ def tight_curve_ahead(lat: float, lon: float, heading_deg: float, curvatures: li
       continue
     if best is None or 1.0 / k < best.radius:
       best = CurveAhead(distance=d, radius=1.0 / k, latitude=plat, longitude=plon)
+  return best
+
+
+def learned_curve_ahead(lat: float, lon: float, heading_deg: float, curves: list[dict],
+                        lookahead_m: float = ADVICE_LOOKAHEAD_M) -> CurveAhead | None:
+  """Nearest learned open curve ahead within lookahead_m, approached the way it was learned: the car's heading
+  within SAME_HEADING_DEG of the heading it went in with on the drives it was hard. A curve is a place, so radius 0."""
+  best = None
+  for c in curves:
+    if abs((c["heading"] - heading_deg + 180) % 360 - 180) > SAME_HEADING_DEG:
+      continue
+    plat, plon = c["latitude"], c["longitude"]
+    d = distance_m(lat, lon, plat, plon)
+    if d > lookahead_m:
+      continue
+    off = abs((bearing_deg(lat, lon, plat, plon) - heading_deg + 180) % 360 - 180)
+    if off > MAX_BEARING_OFF_DEG:
+      continue
+    if best is None or d < best.distance:
+      best = CurveAhead(distance=d, radius=0.0, latitude=plat, longitude=plon)
   return best

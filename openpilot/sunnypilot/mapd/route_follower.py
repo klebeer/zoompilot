@@ -9,7 +9,9 @@ the same until its tracker drops, then the next locked one takes over.
 
 Where the locked routes part ways, nothing tells which one the driver will take. `next` is the
 maneuver ahead on the followed route; `ahead` holds the maneuver ahead on every locked route, so a
-consumer that wants to hear about any possible turn reads `ahead`.
+consumer that wants to hear about any possible turn reads `ahead`. `locked` lists, for every locked
+route, its maneuvers within UPCOMING_M, and `agreed` reads from it the turn every one of them takes:
+a consumer that wants only the turns the car will surely make reads that.
 """
 import math
 from bisect import bisect_left, bisect_right
@@ -23,6 +25,9 @@ OFF_ROUTE_M = 60.0      # distance driven without a match before the route is dr
 WINDOW_BACK_M = 30.0    # a locked tracker only looks this far behind its progress
 WINDOW_AHEAD_M = 200.0  # and this far ahead, so a route that crosses itself cannot jump
 ARRIVE_M = 30.0
+UPCOMING_M = 150.0      # how far ahead `locked` lists each route's maneuvers
+SAME_TURN_M = 15.0      # two routes turn at the same place when their maneuvers are this close
+ROUNDABOUT = ("roundabout", "exit roundabout")
 CELL_M = 100.0
 EARTH_RADIUS_M = 6371000.0
 
@@ -40,6 +45,12 @@ def usable(bundle: dict, now: datetime | None = None) -> bool:
 
 def angle_diff(a: float, b: float) -> float:
   return abs((a - b + 180) % 360 - 180)
+
+
+def distance_m(a: tuple[float, float], b: tuple[float, float]) -> float:
+  """Metres between two nearby points, flat-earth: good to a centimetre over a few hundred metres."""
+  k = math.radians(1.0) * EARTH_RADIUS_M
+  return math.hypot((a[0] - b[0]) * k, (a[1] - b[1]) * k * math.cos(math.radians(a[0])))
 
 
 class Route:
@@ -159,7 +170,7 @@ class Follower:
     if self.active is None:
       state = "no_route" if not self.trackers else "off_route" if self.was_following else "searching"
       return {"state": state, "route_id": None, "progress_m": None, "remaining_m": None, "match_m": None,
-              "next": None, "ahead": []}
+              "next": None, "ahead": [], "locked": []}
     self.was_following = True
     t, route = self.active, self.active.route
     remaining = max(0.0, route.length - t.along)
@@ -171,12 +182,17 @@ class Follower:
       "match_m": round(t.match_m, 1),
       "next": self._next(route, t.along),
       "ahead": self._ahead(),
+      "locked": [{"route_id": t.route.route_id, "upcoming": self._upcoming(t.route, t.along)} for t in self._locked()],
     }
+
+  def _locked(self) -> list[Tracker]:
+    """The locked trackers, the followed one first."""
+    return [self.active] + [t for t in self.trackers if t.locked and t is not self.active]
 
   def _ahead(self) -> list[dict]:
     """The maneuver ahead on each locked route, nearest first, one entry per place."""
     by_place = {}
-    for t in [self.active] + [t for t in self.trackers if t.locked and t is not self.active]:
+    for t in self._locked():
       n = self._next(t.route, t.along)
       if n is None:
         continue
@@ -186,11 +202,44 @@ class Follower:
     return sorted(by_place.values(), key=lambda n: n["distance_m"])
 
   @staticmethod
-  def _next(route: Route, along: float) -> dict | None:
-    i = bisect_right(route.maneuver_at, along)
-    if i >= len(route.maneuvers):
-      return None
+  def _maneuver(route: Route, i: int, along: float) -> dict:
     m = route.maneuvers[i]
     lat, lon = route.shape[m["shape_index"]]
     return {"index": i, "type": m["type"], "modifier": m["modifier"], "distance_m": round(m["distance_m"] - along, 1),
             "turn_deg": m["turn_deg"], "lat": lat, "lon": lon, "street": m["street"]}
+
+  @staticmethod
+  def _next(route: Route, along: float) -> dict | None:
+    i = bisect_right(route.maneuver_at, along)
+    return Follower._maneuver(route, i, along) if i < len(route.maneuvers) else None
+
+  @staticmethod
+  def _upcoming(route: Route, along: float) -> list[dict]:
+    out = []
+    for i in range(bisect_right(route.maneuver_at, along), len(route.maneuvers)):
+      if route.maneuver_at[i] - along > UPCOMING_M:
+        break
+      out.append(Follower._maneuver(route, i, along))
+    return out
+
+
+def side(m: dict) -> str | None:
+  """left or right; None for a roundabout, whose heading change at the entry says nothing of the exit."""
+  return None if m["type"] in ROUNDABOUT else "right" if m["turn_deg"] > 0 else "left"
+
+
+def agreed(state: dict, is_turn, within_m: float) -> dict | None:
+  """The turn every route the car is on takes first, within `within_m`, at the same place and to the
+  same side. None when one of them goes on without turning, or they turn at different places or ways:
+  where the routes part, nothing says which one the driver takes. `is_turn` says what counts as a turn."""
+  firsts = []
+  for route in state.get("locked") or []:
+    first = next((m for m in route["upcoming"] if m["distance_m"] <= within_m and is_turn(m)), None)
+    if first is None:
+      return None
+    firsts.append({"route_id": route["route_id"], **first})
+  if not firsts:
+    return None
+  a = firsts[0]
+  same = all(distance_m((m["lat"], m["lon"]), (a["lat"], a["lon"])) <= SAME_TURN_M and side(m) == side(a) for m in firsts)
+  return a if same else None

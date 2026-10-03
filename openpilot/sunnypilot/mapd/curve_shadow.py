@@ -1,16 +1,23 @@
 """
 Shadow run of the tight-curve warning: records where it would fire, never alerts.
 
-Runs onroad. While openpilot steers at MIN_KPH-MAX_KPH it applies three rules: the map's
+Runs onroad. While openpilot steers at MIN_KPH-MAX_KPH it applies four rules: the map's
 tight-curve rule on the latest mapd curvature points, a list of curves learned from this driver's
-own logs (KNOWN_CURVES_PATH, written by commaia mapd/known_hard_curves.py), and the turn ahead on
-the route the car is following (BUNDLE_PATH, written by comma-nav). It appends one JSON line per
+own logs (KNOWN_CURVES_PATH, written by commaia mapd/known_hard_curves.py), the turn ahead on any
+route the car is on (BUNDLE_PATH, written by comma-nav), and the consensus of those routes: a turn
+only when every route the car is on takes it, at the same place and to the same side. It appends one JSON line per
 would-be warning to LOG_DIR, stamped with time.monotonic_ns() so it joins the rlog on logMonoTime,
 and records which rules fired so they can be compared offline. None alerts.
 
-The route rule needs a bundle. Without one, or with one that has expired, the other two rules run
+Beside the warnings the log gets speed advice, with "kind": "speed_advice": an open curve ahead where
+this car's steering ran out on earlier drives (ADVICE_CURVES_PATH, written by commaia
+mapd/learned_advice_eval.py --write), approached the same way, while the car steers above
+ADVICE_KPH, once per curve. Nothing is shown.
+
+The route rules need a bundle. Without one, or with one that has expired, the other two rules run
 as before. What the route follower saw goes to NAV_LOG_DIR as well, free of the warning's holdoff:
-each change of state and each turn it announced, so the follower can be scored on its own.
+each change of state, and each turn each route rule announced with the blinker at that moment, so
+both rules can be scored on their own and against what the driver signalled.
 """
 import json
 import math
@@ -20,11 +27,13 @@ import time
 import openpilot.cereal.messaging as messaging
 from openpilot.common.hardware import PC
 from openpilot.common.swaglog import cloudlog
-from openpilot.sunnypilot.mapd.curve_warning import LOOKAHEAD_M, MIN_RADIUS_M, CurveAhead, distance_m, known_curve_ahead, tight_curve_ahead
-from openpilot.sunnypilot.mapd.route_follower import Follower, usable
+from openpilot.sunnypilot.mapd.curve_warning import (ADVICE_KPH, LOOKAHEAD_M, MIN_RADIUS_M, CurveAhead, distance_m, known_curve_ahead,
+                                                     learned_curve_ahead, tight_curve_ahead)
+from openpilot.sunnypilot.mapd.route_follower import Follower, agreed, usable
 
 SHM = "/dev/shm/params/d"
 KNOWN_CURVES_PATH = os.path.expanduser("~/.comma/known_hard_curves.json") if PC else "/data/known_hard_curves.json"
+ADVICE_CURVES_PATH = os.path.expanduser("~/.comma/advice_curves.json") if PC else "/data/advice_curves.json"
 LOG_DIR = os.path.expanduser("~/.comma/curve_shadow") if PC else "/data/media/0/curve_shadow"
 BUNDLE_PATH = os.path.expanduser("~/.comma/nav/route_bundle.json") if PC else "/data/nav/route_bundle.json"
 NAV_LOG_DIR = os.path.expanduser("~/.comma/nav_shadow") if PC else "/data/media/0/nav_shadow"
@@ -57,6 +66,16 @@ def load_known_curves(path: str = KNOWN_CURVES_PATH) -> list[dict]:
     return []
 
 
+def load_advice_curves(path: str = ADVICE_CURVES_PATH) -> list[dict]:
+  """The learned open curves, or an empty list when the file is absent or unreadable."""
+  try:
+    with open(path) as f:
+      curves = json.load(f)
+    return [c for c in curves if {"latitude", "longitude", "heading"} <= c.keys()]
+  except (OSError, ValueError, TypeError, AttributeError):
+    return []
+
+
 def load_follower(path: str = BUNDLE_PATH) -> Follower | None:
   """A follower for the route bundle, or None when there is no bundle the device should follow."""
   try:
@@ -67,12 +86,26 @@ def load_follower(path: str = BUNDLE_PATH) -> Follower | None:
   return Follower(bundle) if usable(bundle) else None
 
 
+def is_route_turn(n: dict) -> bool:
+  return abs(n["turn_deg"]) >= ROUTE_TURN_DEG or n["type"] in ROUTE_ALWAYS
+
+
 def route_turns_ahead(nav: dict | None) -> list[dict]:
   """The turns and roundabouts within LOOKAHEAD_M on the routes the car is on, nearest first."""
   if nav is None or nav["state"] != "following":
     return []
-  return [n for n in nav["ahead"]
-          if n["distance_m"] <= LOOKAHEAD_M and (abs(n["turn_deg"]) >= ROUTE_TURN_DEG or n["type"] in ROUTE_ALWAYS)]
+  return [n for n in nav["ahead"] if n["distance_m"] <= LOOKAHEAD_M and is_route_turn(n)]
+
+
+def route_turn_agreed(nav: dict | None) -> dict | None:
+  """The turn every route the car is on takes within LOOKAHEAD_M, or None where they part ways."""
+  if nav is None or nav["state"] != "following":
+    return None
+  return agreed(nav, is_route_turn, LOOKAHEAD_M)
+
+
+def as_curve(n: dict | None) -> CurveAhead | None:
+  return CurveAhead(distance=n["distance_m"], radius=0.0, latitude=n["lat"], longitude=n["lon"]) if n else None
 
 
 def describe_turn(n: dict) -> dict:
@@ -91,12 +124,12 @@ class Shadow:
     """The record to write when a rule fires on a new curve, else None."""
     if not lat_active or not (MIN_KPH <= v_kph <= MAX_KPH):
       return None
-    turns = route_turns_ahead(nav)
-    turn = CurveAhead(distance=turns[0]["distance_m"], radius=0.0, latitude=turns[0]["lat"], longitude=turns[0]["lon"]) if turns else None
+    turns, sure = route_turns_ahead(nav), route_turn_agreed(nav)
+    turn, consensus = as_curve(turns[0] if turns else None), as_curve(sure)
     # The map and learned rules stay as they were: silent while mapd has no curvature points.
     hit = tight_curve_ahead(lat, lon, heading, curvatures) if curvatures else None
     learned = known_curve_ahead(lat, lon, heading, self.known_curves) if curvatures else None
-    fired = [(name, h) for name, h in (("map", hit), ("learned", learned), ("route", turn)) if h is not None]
+    fired = [(name, h) for name, h in (("map", hit), ("learned", learned), ("route", turn), ("consensus", consensus)) if h is not None]
     if not fired:
       return None
     # The nearest leads the record; "rules" says which would have fired on their own.
@@ -116,29 +149,56 @@ class Shadow:
                     "known_curves": len(self.known_curves), "route_turn_deg": ROUTE_TURN_DEG}}
     if turns:
       rec["route"] = describe_turn(turns[0])
+    if sure:
+      rec["consensus"] = describe_turn(sure)
     return rec
 
 
+class SpeedAdvice:
+  """Where the car would be told to slow to ADVICE_KPH for a learned open curve ahead: once per curve, while openpilot steers."""
+
+  def __init__(self, curves: list[dict] | None = None):
+    self.curves = curves if curves is not None else load_advice_curves()
+    self.advised: list[tuple[float, float, float]] = []   # (time, latitude, longitude) of each curve advised for
+
+  def step(self, now: float, lat_active: bool, v_kph: float, lat: float, lon: float, heading: float, road=None):
+    if not self.curves or not lat_active or not (ADVICE_KPH < v_kph <= MAX_KPH):
+      return None
+    curve = learned_curve_ahead(lat, lon, heading, self.curves)
+    if curve is None:
+      return None
+    self.advised = [a for a in self.advised if now - a[0] < SAME_CURVE_HOLDOFF_S]
+    if any(distance_m(curve.latitude, curve.longitude, a[1], a[2]) < SAME_CURVE_M for a in self.advised):
+      return None
+    self.advised.append((now, curve.latitude, curve.longitude))
+    return {"kind": "speed_advice", "lat": lat, "lon": lon, "heading": round(heading, 1), "v_kph": round(v_kph, 1),
+            "distance_m": round(curve.distance, 1), "curve_lat": curve.latitude, "curve_lon": curve.longitude,
+            "advice_kph": ADVICE_KPH, "advice_curves": len(self.curves), "road": road}
+
+
 class NavLog:
-  """What the route follower saw, apart from the warning: each change of state and each turn announced."""
+  """What the route follower saw, apart from the warning: each change of state, and each turn each route
+  rule announced. `rule` is "ahead" (any route the car is on) or "consensus" (every one of them)."""
 
   def __init__(self):
     self.state = None
-    self.announced: dict[tuple[float, float], float] = {}
+    self.announced: dict[tuple[str, float, float], float] = {}
 
-  def records(self, now: float, nav: dict, lat: float, lon: float, v_kph: float, lat_active: bool) -> list[dict]:
+  def records(self, now: float, nav: dict, lat: float, lon: float, v_kph: float, lat_active: bool, blinker: str | None = None) -> list[dict]:
     out = []
     state = (nav["state"], nav["route_id"])
     if state != self.state:
       self.state = state
       out.append({"kind": "state", "state": nav["state"], "route_id": nav["route_id"], "progress_m": nav["progress_m"],
                   "lat": lat, "lon": lon})
-    for n in route_turns_ahead(nav):
-      place = (n["lat"], n["lon"])
-      if now - self.announced.get(place, -1e9) >= SAME_TURN_S:
-        out.append({"kind": "turn", **describe_turn(n), "turn_lat": n["lat"], "turn_lon": n["lon"], "lat": lat, "lon": lon,
-                    "v_kph": round(v_kph, 1), "lat_active": lat_active})
-      self.announced[place] = now
+    sure = route_turn_agreed(nav)
+    for rule, turns in (("ahead", route_turns_ahead(nav)), ("consensus", [sure] if sure else [])):
+      for n in turns:
+        place = (rule, n["lat"], n["lon"])
+        if now - self.announced.get(place, -1e9) >= SAME_TURN_S:
+          out.append({"kind": "turn", "rule": rule, **describe_turn(n), "turn_lat": n["lat"], "turn_lon": n["lon"], "lat": lat, "lon": lon,
+                      "v_kph": round(v_kph, 1), "lat_active": lat_active, "blinker": blinker})
+        self.announced[place] = now
     return out
 
 
@@ -146,7 +206,7 @@ def main() -> None:
   os.makedirs(LOG_DIR, exist_ok=True)
   path = os.path.join(LOG_DIR, time.strftime("%Y-%m-%d--%H-%M-%S") + f"--{time.monotonic_ns()}.jsonl")
   sm = messaging.SubMaster(["carState", "carControl", "liveLocationKalman"])
-  shadow = Shadow()
+  shadow, advice = Shadow(), SpeedAdvice()
   follower, nav_log, nav, fed_at, nav_out = load_follower(), NavLog(), None, None, None
   if follower is not None:
     os.makedirs(NAV_LOG_DIR, exist_ok=True)
@@ -174,18 +234,22 @@ def main() -> None:
         lat, lon = loc.positionGeodetic.value[0], loc.positionGeodetic.value[1]
         heading = math.degrees(loc.calibratedOrientationNED.value[2]) % 360
         lat_active, v_kph = sm["carControl"].latActive, sm["carState"].vEgo * 3.6
+        left, right = sm["carState"].leftBlinker, sm["carState"].rightBlinker
+        blinker = None if left == right else "left" if left else "right"
         if follower is not None and (fed_at is None or distance_m(lat, lon, *fed_at) >= FOLLOW_STEP_M):
           fed_at = (lat, lon)
           nav = follower.update(lat, lon, heading)
-          for seen in nav_log.records(time.monotonic(), nav, lat, lon, v_kph, lat_active):
+          for seen in nav_log.records(time.monotonic(), nav, lat, lon, v_kph, lat_active, blinker):
             seen["mono_ns"] = time.monotonic_ns()
             nav_out.write(json.dumps(seen, separators=(",", ":")) + "\n")
             nav_out.flush()
-        rec = shadow.step(time.monotonic(), lat_active, v_kph, lat, lon, heading, curvatures, road, nav)
-        if rec is not None:
-          rec["mono_ns"] = time.monotonic_ns()
-          out.write(json.dumps(rec, separators=(",", ":")) + "\n")
-          out.flush()
+        now = time.monotonic()
+        for rec in (shadow.step(now, lat_active, v_kph, lat, lon, heading, curvatures, road, nav),
+                    advice.step(now, lat_active, v_kph, lat, lon, heading, road)):
+          if rec is not None:
+            rec["mono_ns"] = time.monotonic_ns()
+            out.write(json.dumps(rec, separators=(",", ":")) + "\n")
+            out.flush()
       except Exception:
         cloudlog.exception("curve_shadow: step failed")
         time.sleep(1.0)

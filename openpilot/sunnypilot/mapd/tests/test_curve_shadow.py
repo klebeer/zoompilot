@@ -1,6 +1,6 @@
 import json
 
-from openpilot.sunnypilot.mapd.curve_shadow import NavLog, Shadow, load_follower, load_known_curves, route_turns_ahead
+from openpilot.sunnypilot.mapd.curve_shadow import NavLog, Shadow, load_follower, load_known_curves, route_turn_agreed, route_turns_ahead
 from openpilot.sunnypilot.mapd.curve_warning import known_curve_ahead, tight_curve_ahead
 
 # car at the origin heading north; one degree of latitude is about 111 km
@@ -94,14 +94,20 @@ def maneuver(distance_m, turn_deg=90.0, kind="turn", north_m=None, route_id="mai
           "distance_m": distance_m, "turn_deg": turn_deg, "lat": at["latitude"], "lon": at["longitude"], "street": "Calle Uno"}
 
 
-def following(*ahead, state="following"):
+def following(*ahead, state="following", locked=None):
+  """The follower's state. `locked` is {route_id: [its upcoming maneuvers]}; by default every route in `ahead` with that one."""
+  if locked is None:
+    locked = {}
+    for n in ahead:
+      locked.setdefault(n["route_id"], []).append(n)
   return {"state": state, "route_id": "main", "progress_m": 500.0, "remaining_m": 3000.0, "match_m": 2.0,
-          "next": ahead[0] if ahead else None, "ahead": list(ahead)}
+          "next": ahead[0] if ahead else None, "ahead": list(ahead),
+          "locked": [{"route_id": r, "upcoming": ms} for r, ms in locked.items()]}
 
 
 def test_route_turn_fires_without_any_map_data():
   rec = Shadow(known_curves=[]).step(0.0, True, 35, LAT, LON, NORTH, None, "Av. Central", following(maneuver(80)))
-  assert rec["rules"] == ["route"] and rec["distance_m"] == 80.0 and rec["radius_m"] == 0.0
+  assert rec["rules"] == ["route", "consensus"] and rec["distance_m"] == 80.0 and rec["radius_m"] == 0.0, "one route: it agrees with itself"
   assert rec["route"] == {"route_id": "main", "type": "turn", "modifier": "right", "turn_deg": 90.0,
                           "street": "Calle Uno", "distance_m": 80}
   assert rec["rule"]["route_turn_deg"] == 45.0
@@ -130,13 +136,13 @@ def test_route_rule_keeps_the_gates_of_the_other_rules():
   assert s.step(10.0, True, 35, LAT, LON, NORTH, None, None, nav) is None, "one warning every 20 s"
 
 
-def test_three_rules_recorded_and_the_nearest_leads():
+def test_every_rule_recorded_and_the_nearest_leads():
   s = Shadow(known_curves=[place(60, 0)])
   rec = s.step(0.0, True, 35, LAT, LON, NORTH, [point(80, 0, 12)], None, following(maneuver(30)))
-  assert rec["rules"] == ["map", "learned", "route"] and rec["distance_m"] == 30.0
+  assert rec["rules"] == ["map", "learned", "route", "consensus"] and rec["distance_m"] == 30.0
   s = Shadow(known_curves=[place(40, 0)])
   rec = s.step(0.0, True, 35, LAT, LON, NORTH, [point(80, 0, 12)], None, following(maneuver(90)))
-  assert rec["rules"] == ["map", "learned", "route"] and 35 < rec["distance_m"] < 45 and rec["route"]["distance_m"] == 90
+  assert rec["rules"] == ["map", "learned", "route", "consensus"] and 35 < rec["distance_m"] < 45 and rec["route"]["distance_m"] == 90
 
 
 def test_without_a_route_the_record_is_as_before():
@@ -174,14 +180,79 @@ def test_nav_log_records_each_state_change_and_each_turn_once():
   assert [r["kind"] for r in first] == ["state"] and first[0]["state"] == "searching"
   assert log.records(1.0, following(state="searching"), LAT, LON, 20.0, True) == []
   seen = log.records(2.0, following(maneuver(90)), LAT, LON, 30.0, False)
-  assert [r["kind"] for r in seen] == ["state", "turn"]
+  assert [(r["kind"], r.get("rule")) for r in seen] == [("state", None), ("turn", "ahead"), ("turn", "consensus")], "one route agrees with itself"
   assert seen[1]["street"] == "Calle Uno" and seen[1]["distance_m"] == 90 and seen[1]["lat_active"] is False
   assert log.records(3.0, following(maneuver(70, north_m=90)), LAT, LON, 30.0, True) == [], "the same turn, nearer"
   again = log.records(200.0, following(maneuver(90)), LAT, LON, 30.0, True)
-  assert [r["kind"] for r in again] == ["turn"], "another pass by the same turn"
+  assert [r["kind"] for r in again] == ["turn", "turn"], "another pass by the same turn"
 
 
 def test_nav_log_records_the_turns_of_every_route_the_car_is_on():
   log = NavLog()
   seen = log.records(0.0, following(maneuver(60), maneuver(95, turn_deg=-70.0, route_id="alt")), LAT, LON, 30.0, True)
   assert [(r["kind"], r.get("route_id")) for r in seen] == [("state", "main"), ("turn", "main"), ("turn", "alt")]
+
+
+def test_consensus_is_a_turn_every_route_the_car_is_on_takes():
+  turn = maneuver(80)
+  assert route_turn_agreed(following(turn, locked={"main": [turn], "alt": [{**turn, "route_id": "alt"}]}))["distance_m"] == 80
+  straight_on = maneuver(200, kind="continue", turn_deg=0.0, route_id="alt")
+  assert route_turn_agreed(following(turn, locked={"main": [turn], "alt": [straight_on]})) is None, "the alternate goes straight"
+  other_way = maneuver(80, turn_deg=-90.0, route_id="alt")
+  assert route_turn_agreed(following(turn, locked={"main": [turn], "alt": [other_way]})) is None, "same corner, the other way"
+  assert route_turn_agreed(following(turn, state="off_route")) is None
+  assert route_turn_agreed(following(maneuver(150))) is None, "beyond the lookahead"
+  gentle_then_turn = [maneuver(40, turn_deg=10.0, kind="continue"), maneuver(90, turn_deg=-88.0)]
+  assert route_turn_agreed(following(*gentle_then_turn, locked={"main": gentle_then_turn}))["distance_m"] == 90
+
+
+def test_shadow_records_the_consensus_rule_beside_the_route_rule():
+  turn, alt = maneuver(80), maneuver(80, route_id="alt")
+  rec = Shadow(known_curves=[]).step(0.0, True, 35, LAT, LON, NORTH, None, None, following(turn, locked={"main": [turn], "alt": [alt]}))
+  assert rec["rules"] == ["route", "consensus"] and rec["consensus"]["distance_m"] == 80
+  straight_on = maneuver(200, kind="continue", turn_deg=0.0, route_id="alt")
+  rec = Shadow(known_curves=[]).step(0.0, True, 35, LAT, LON, NORTH, None, None, following(turn, locked={"main": [turn], "alt": [straight_on]}))
+  assert rec["rules"] == ["route"] and "consensus" not in rec
+
+
+def test_nav_log_records_each_rule_apart_with_the_blinker():
+  log = NavLog()
+  turn, straight_on = maneuver(90), maneuver(200, kind="continue", turn_deg=0.0, route_id="alt")
+  seen = log.records(0.0, following(turn, locked={"main": [turn], "alt": [straight_on]}), LAT, LON, 30.0, True, "right")
+  assert [(r["kind"], r.get("rule"), r.get("blinker")) for r in seen] == [("state", None, None), ("turn", "ahead", "right")]
+  seen = log.records(1.0, following(turn), LAT, LON, 30.0, True, None)
+  assert [(r["kind"], r["rule"], r["blinker"]) for r in seen] == [("turn", "consensus", None)], "ahead already told; consensus is new"
+  assert log.records(2.0, following(turn), LAT, LON, 30.0, True, "left") == []
+
+
+def learned(north_m, heading=NORTH):
+  return {**place(north_m, 0), "heading": heading, "drives": 3}
+
+
+def test_learned_curve_ahead_wants_the_same_way_in():
+  from openpilot.sunnypilot.mapd.curve_warning import learned_curve_ahead
+  hit = learned_curve_ahead(LAT, LON, NORTH, [learned(110), learned(60)])
+  assert hit is not None and 55 < hit.distance < 65
+  assert learned_curve_ahead(LAT, LON, NORTH, [learned(60, heading=180.0)]) is None, "learned coming the other way"
+  assert learned_curve_ahead(LAT, LON, NORTH, [learned(-40), learned(140)]) is None, "behind, or beyond the lookahead"
+
+
+def test_speed_advice_once_per_curve_while_steering_above_the_advice():
+  from openpilot.sunnypilot.mapd.curve_shadow import SpeedAdvice
+  advice = SpeedAdvice([learned(90)])
+  assert advice.step(0.0, True, 25, LAT, LON, NORTH) is None, "already slow enough"
+  assert advice.step(0.0, False, 45, LAT, LON, NORTH) is None, "not steering"
+  rec = advice.step(0.0, True, 45, LAT, LON, NORTH, "Av. Central")
+  assert rec["kind"] == "speed_advice" and rec["advice_kph"] == 30.0 and 85 < rec["distance_m"] < 95 and rec["road"] == "Av. Central"
+  assert advice.step(5.0, True, 40, LAT, LON, NORTH) is None, "same curve"
+  assert advice.step(70.0, True, 40, LAT, LON, NORTH) is not None, "another pass by it"
+  assert SpeedAdvice([]).step(0.0, True, 45, LAT, LON, NORTH) is None, "no learned curves, no advice"
+
+
+def test_missing_advice_file_is_no_curves(tmp_path):
+  from openpilot.sunnypilot.mapd.curve_shadow import load_advice_curves
+  assert load_advice_curves("/nonexistent/advice_curves.json") == []
+  bad = tmp_path / "advice_curves.json"
+  bad.write_text('[{"latitude": 1}]')
+  assert load_advice_curves(str(bad)) == []
+
