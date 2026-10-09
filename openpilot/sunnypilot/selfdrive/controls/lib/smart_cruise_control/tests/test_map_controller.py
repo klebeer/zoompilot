@@ -55,6 +55,26 @@ class TestSmartCruiseControlMap(OpenpilotTestCase):
     assert self.scc_m.state == VisionState.disabled
     assert not self.scc_m.is_active
 
+  def test_system_disabled_does_not_read_the_map_targets(self):
+    self.params.put_bool("SmartCruiseControlMap", False, block=True)
+    self.scc_m.enabled = self.params.get_bool("SmartCruiseControlMap")
+    real, read = self.scc_m.mem_params, []
+
+    class Recording:
+      def get(self, key, *args, **kwargs):
+        read.append(key)
+        return real.get(key, *args, **kwargs)
+
+    self.scc_m.mem_params = Recording()
+    for _ in range(int(10. / DT_MDL)):
+      self.scc_m.update(True, False, 20., 0., 30.)
+    assert read == []
+    assert self.scc_m.state == VisionState.disabled and self.scc_m.output_v_target == V_CRUISE_UNSET
+
+    self.scc_m.enabled = True
+    self.scc_m.update(True, False, 20., 0., 30.)
+    assert "MapTargetVelocities" in read
+
   def test_disabled(self):
     for _ in range(int(10. / DT_MDL)):
       self.scc_m.update(False, False, 0., 0., 0.)

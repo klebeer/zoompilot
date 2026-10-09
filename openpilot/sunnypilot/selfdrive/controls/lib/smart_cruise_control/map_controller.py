@@ -230,7 +230,11 @@ class SmartCruiseControlMap:
     self.v_cruise = v_cruise
 
     self.update_params()
-    self.update_calculations()
+    # Each pass walks every map target, hundreds on a winding road; a disabled controller publishes none of it.
+    if self.enabled:
+      self.update_calculations()
+    else:
+      self.v_target, self.target_lat, self.target_lon, self.target_distance = 0.0, 0.0, 0.0, 0.0
 
     self.is_enabled, self.is_active = self._update_state_machine()
 
