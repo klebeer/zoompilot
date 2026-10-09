@@ -11,6 +11,15 @@ from openpilot.sunnypilot.selfdrive.controls.lib.auto_lane_change import AutoLan
 TurnDirection = custom.ModelDataV2SP.TurnDirection
 
 
+class FixedRoute:
+  """Stands in for route_desire_live.Reader: the side the route confirms, or None."""
+  def __init__(self, side):
+    self.side = side
+
+  def get(self, now_ns=None):
+    return self.side
+
+
 class TestLaneTurnDesire(OpenpilotTestCase):
   @parameterized.expand([
     (True, False, 5, False, False, TurnDirection.turnLeft),
@@ -54,6 +63,21 @@ class TestLaneTurnDesire(OpenpilotTestCase):
     # no turn
     controller.update_lane_turn(False, False, False, False, 7)
     assert controller.get_turn_direction() == TurnDirection.none
+
+  @parameterized.expand([
+    ("left", True, False, False, TurnDirection.turnLeft),
+    ("right", False, True, False, TurnDirection.turnRight),
+    ("right", True, False, False, TurnDirection.none),  # route and blinker disagree
+    (None, True, False, False, TurnDirection.none),  # no turn confirmed by the route
+    ("left", True, False, True, TurnDirection.none),  # blind spot on that side
+  ])
+  def test_route_turn_with_the_setting_off(self, route, left_blinker, right_blinker, blindspot_left, expected):
+    controller = LaneTurnController(DesireHelper())
+    controller.enabled = False
+    controller.lane_turn_value = LANE_CHANGE_SPEED_MIN
+    controller.route = FixedRoute(route)
+    controller.update_lane_turn(blindspot_left, False, left_blinker, right_blinker, 5)
+    assert controller.get_turn_direction() == expected
 
   @parameterized.expand([
     (8.93, TurnDirection.turnLeft),  # just below threshold

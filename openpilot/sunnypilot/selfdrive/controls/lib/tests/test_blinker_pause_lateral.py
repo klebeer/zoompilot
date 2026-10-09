@@ -11,6 +11,15 @@ from openpilot.sunnypilot.selfdrive.controls.lib.blinker_pause_lateral import Bl
 from openpilot.common.test import OpenpilotTestCase
 
 
+class FixedRoute:
+  """Stands in for route_desire_live.Reader: the side the route confirms, or None."""
+  def __init__(self, side):
+    self.side = side
+
+  def get(self, now_ns=None):
+    return self.side
+
+
 class TestBlinkerPauseLateral(OpenpilotTestCase):
 
   def setup_method(self):
@@ -118,6 +127,29 @@ class TestBlinkerPauseLateral(OpenpilotTestCase):
       (True, True): False
     }
     self._test_should_blinker_pause_lateral(expected_results)
+
+  def test_route_turn_to_the_blinker_side_keeps_steering(self):
+    self.CS.vEgo = 4.5  # ~10 MPH
+    self.blinker_pause_lateral.route = FixedRoute("left")
+
+    expected_results = {
+      (False, False): False,
+      (True, False): False,
+      (False, True): True,
+      (True, True): False
+    }
+    self._test_should_blinker_pause_lateral(expected_results)
+
+  def test_route_turn_ends_a_pause_without_reengage_delay(self):
+    self.blinker_pause_lateral.reengage_delay = 2  # seconds
+    self.CS.vEgo = 4.5  # ~10 MPH
+    self.CS.leftBlinker = True
+    assert self.blinker_pause_lateral.update(self.CS)
+    self.blinker_pause_lateral.route = FixedRoute("left")
+    assert not self.blinker_pause_lateral.update(self.CS)
+    self.blinker_pause_lateral.route = FixedRoute(None)
+    self.CS.leftBlinker = False
+    assert not self.blinker_pause_lateral.update(self.CS)
 
   def test_change_min_speed_threshold(self):
     self.blinker_pause_lateral.min_speed = 30  # MPH

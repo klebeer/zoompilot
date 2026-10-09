@@ -8,6 +8,7 @@ from openpilot.cereal import custom
 
 from openpilot.common.constants import CV
 from openpilot.common.params import Params
+from openpilot.sunnypilot.mapd.route_desire_live import Reader
 
 TurnDirection = custom.ModelDataV2SP.TurnDirection
 
@@ -22,6 +23,7 @@ class LaneTurnController:
     self.lane_turn_value = float(self.params.get("LaneTurnValue", return_default=True)) * CV.MPH_TO_MS
     self.param_read_counter = 0
     self.enabled = self.params.get_bool("LaneTurnDesire")
+    self.route = Reader()
 
   def read_params(self):
     self.enabled = self.params.get_bool("LaneTurnDesire")
@@ -42,6 +44,10 @@ class LaneTurnController:
       self.turn_direction = TurnDirection.none
 
   def get_turn_direction(self):
-    if not self.enabled:
-      return TurnDirection.none
-    return self.turn_direction
+    if self.enabled:
+      return self.turn_direction
+    # With the setting off, only a turn the route confirms to the blinker's side (route_desire_live).
+    route = self.route.get()
+    if (route == "left" and self.turn_direction == TurnDirection.turnLeft) or (route == "right" and self.turn_direction == TurnDirection.turnRight):
+      return self.turn_direction
+    return TurnDirection.none

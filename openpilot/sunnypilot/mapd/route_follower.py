@@ -12,12 +12,19 @@ maneuver ahead on the followed route; `ahead` holds the maneuver ahead on every 
 consumer that wants to hear about any possible turn reads `ahead`. `locked` lists, for every locked
 route, its maneuvers within UPCOMING_M, and `agreed` reads from it the turn every one of them takes:
 a consumer that wants only the turns the car will surely make reads that.
+
+The driver can say which route this trip takes: a choice (contract route-choice.schema.json) names
+a route of the bundle. While the car is on it, it is the followed route, `chosen` lists its
+maneuvers within UPCOMING_M, and `chosen_turn` reads the next turn from it. A choice holds until
+the car arrives at the route's end, or CHOICE_HOURS after it was made.
 """
 import math
 from bisect import bisect_left, bisect_right
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 SCHEMA_VERSION = 1
+CHOICE_SCHEMA_VERSION = 1
+CHOICE_HOURS = 24.0     # a choice the car never arrived on lapses after this long
 MATCH_M = 25.0          # fix to route: GPS error plus the car's lane on a wide avenue
 HEADING_DEG = 45.0      # car heading against the route's direction
 LOCK_M = 50.0           # distance driven along a route before it counts as followed
@@ -32,15 +39,43 @@ CELL_M = 100.0
 EARTH_RADIUS_M = 6371000.0
 
 
+def stamp(when: datetime) -> str:
+  return when.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_stamp(text: str) -> datetime:
+  return datetime.strptime(text, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+
+
 def usable(bundle: dict, now: datetime | None = None) -> bool:
   """Whether a device should follow this bundle: a known version that has not expired."""
   try:
     if bundle["schema"] != SCHEMA_VERSION or not bundle["routes"]:
       return False
-    expires = datetime.strptime(bundle["expires_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+    expires = parse_stamp(bundle["expires_at"])
   except (KeyError, TypeError, ValueError):
     return False
   return (now or datetime.now(UTC)) < expires
+
+
+def make_choice(bundle_id: str, route_id: str, chosen_by: str, now: datetime | None = None) -> dict:
+  """The route the driver picked for this trip, in the route-choice contract. `chosen_by` is app or device."""
+  now = now or datetime.now(UTC)
+  return {"schema": CHOICE_SCHEMA_VERSION, "bundle_id": bundle_id, "route_id": route_id, "chosen_by": chosen_by,
+          "chosen_at": stamp(now), "expires_at": stamp(now + timedelta(hours=CHOICE_HOURS))}
+
+
+def choice_holds(choice: dict | None, bundle: dict, now: datetime | None = None) -> bool:
+  """Whether a choice holds for this bundle: a known version, made for it, naming one of its routes, the car
+  not arrived yet, and not lapsed."""
+  try:
+    if choice is None or choice["schema"] != CHOICE_SCHEMA_VERSION or choice["bundle_id"] != bundle.get("bundle_id") or choice.get("arrived_at"):
+      return False
+    if choice["route_id"] not in {r["route_id"] for r in bundle.get("routes", [])}:
+      return False
+    return (now or datetime.now(UTC)) < parse_stamp(choice["expires_at"])
+  except (KeyError, TypeError, ValueError):
+    return False
 
 
 def angle_diff(a: float, b: float) -> float:
@@ -151,10 +186,20 @@ class Tracker:
 
 class Follower:
   def __init__(self, bundle: dict):
+    self.bundle = bundle
+    self.bundle_id = bundle.get("bundle_id")
     self.trackers = [Tracker(Route(r)) for r in bundle.get("routes", [])]
     self.active: Tracker | None = None
+    self.chosen: Tracker | None = None
     self.was_following = False
     self.last = None
+
+  def choose(self, choice: dict | None, now: datetime | None = None) -> bool:
+    """Takes the driver's choice. False, and no route chosen, when there is none or it does not hold."""
+    self.chosen = None
+    if choice_holds(choice, self.bundle, now):
+      self.chosen = next(t for t in self.trackers if t.route.route_id == choice["route_id"])
+    return self.chosen is not None
 
   def update(self, lat: float, lon: float, heading: float) -> dict:
     """The state to publish for this fix. `heading` is degrees clockwise from north."""
@@ -165,12 +210,14 @@ class Follower:
     self.last = (lat, lon)
     for t in self.trackers:
       t.update(lat, lon, heading, moved)
-    if self.active is None or not self.active.locked:
+    if self.chosen is not None and self.chosen.locked:
+      self.active = self.chosen
+    elif self.active is None or not self.active.locked:
       self.active = next((t for t in self.trackers if t.locked), None)
     if self.active is None:
       state = "no_route" if not self.trackers else "off_route" if self.was_following else "searching"
       return {"state": state, "route_id": None, "progress_m": None, "remaining_m": None, "match_m": None,
-              "next": None, "ahead": [], "locked": []}
+              "next": None, "ahead": [], "locked": [], "chosen": self._chosen()}
     self.was_following = True
     t, route = self.active, self.active.route
     remaining = max(0.0, route.length - t.along)
@@ -183,7 +230,18 @@ class Follower:
       "next": self._next(route, t.along),
       "ahead": self._ahead(),
       "locked": [{"route_id": t.route.route_id, "upcoming": self._upcoming(t.route, t.along)} for t in self._locked()],
+      "chosen": self._chosen(),
     }
+
+  def _chosen(self) -> dict | None:
+    """The chosen route: whether the car is on it, whether it has arrived, and its maneuvers within UPCOMING_M."""
+    t = self.chosen
+    if t is None:
+      return None
+    if not t.locked:
+      return {"route_id": t.route.route_id, "on_route": False, "arrived": False, "upcoming": []}
+    return {"route_id": t.route.route_id, "on_route": True, "arrived": t.route.length - t.along <= ARRIVE_M,
+            "upcoming": self._upcoming(t.route, t.along)}
 
   def _locked(self) -> list[Tracker]:
     """The locked trackers, the followed one first."""
@@ -243,3 +301,12 @@ def agreed(state: dict, is_turn, within_m: float) -> dict | None:
   a = firsts[0]
   same = all(distance_m((m["lat"], m["lon"]), (a["lat"], a["lon"])) <= SAME_TURN_M and side(m) == side(a) for m in firsts)
   return a if same else None
+
+
+def chosen_turn(state: dict, is_turn, within_m: float) -> dict | None:
+  """The first turn within `within_m` on the chosen route, while the car is on it; None otherwise."""
+  chosen = state.get("chosen")
+  if not chosen or not chosen["on_route"]:
+    return None
+  first = next((m for m in chosen["upcoming"] if m["distance_m"] <= within_m and is_turn(m)), None)
+  return {"route_id": chosen["route_id"], **first} if first else None

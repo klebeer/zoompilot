@@ -12,6 +12,7 @@ from openpilot.selfdrive.ui.mici.widgets.dialog import BigConfirmationDialog, Bi
 from openpilot.selfdrive.ui.sunnypilot.mici.layouts.cruise import CruiseLayoutMici
 from openpilot.selfdrive.ui.sunnypilot.mici.layouts.display import DisplayLayoutMici
 from openpilot.selfdrive.ui.sunnypilot.mici.layouts.models import ModelsLayoutMici
+from openpilot.selfdrive.ui.sunnypilot.mici.layouts.routes import RoutesLayoutMici
 from openpilot.selfdrive.ui.sunnypilot.mici.layouts.software import SoftwareLayoutSP
 from openpilot.selfdrive.ui.sunnypilot.mici.layouts.steering import SteeringLayoutMici
 from openpilot.selfdrive.ui.sunnypilot.mici.layouts.sunnylink import SunnylinkLayoutMici
@@ -53,6 +54,7 @@ class SettingsLayoutSP(OP.SettingsLayout):
     self.icon_offroad_slider = gui_app.texture("icons_mici/settings/device/lkas.png", BIG_ICON_SIZE, BIG_ICON_SIZE)
 
     panels = [
+      (tr("routes"),    RoutesLayoutMici,    gui_app.texture(f"{SP_ICON}/icon_map.png", 64, 64)),
       (tr("models"),    ModelsLayoutMici,    gui_app.texture(f"{SP_ICON}/icon_models.png", 64, 64)),
       (tr("cruise"),    CruiseLayoutMici,    gui_app.texture(f"{SP_ICON}/icon_vehicle.png", 64, 64)),
       (tr("steering"),  SteeringLayoutMici,  gui_app.texture(f"{SP_ICON}/icon_lateral.png", 64, 64)),

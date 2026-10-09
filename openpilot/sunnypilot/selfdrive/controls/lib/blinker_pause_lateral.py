@@ -8,11 +8,13 @@ from opendbc.car.structs import car
 
 from openpilot.common.constants import CV
 from openpilot.common.params import Params
+from openpilot.sunnypilot.mapd.route_desire_live import Reader
 
 
 class BlinkerPauseLateral:
   def __init__(self):
     self.params = Params()
+    self.route = Reader()
 
     self.enabled = self.params.get_bool("BlinkerPauseLateralControl")
     self.is_metric = self.params.get_bool("IsMetric")
@@ -31,6 +33,11 @@ class BlinkerPauseLateral:
       return False
 
     one_blinker = CS.leftBlinker != CS.rightBlinker
+    # The route confirms a turn to the blinker's side: keep steering, the model is asked for the turn.
+    if one_blinker and self.route.get() == ("left" if CS.leftBlinker else "right"):
+      self.blinker_off_timer = 0.0
+      return False
+
     speed_factor = CV.KPH_TO_MS if self.is_metric else CV.MPH_TO_MS
     min_speed_ms = self.min_speed * speed_factor
 

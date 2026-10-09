@@ -94,15 +94,16 @@ def maneuver(distance_m, turn_deg=90.0, kind="turn", north_m=None, route_id="mai
           "distance_m": distance_m, "turn_deg": turn_deg, "lat": at["latitude"], "lon": at["longitude"], "street": "Calle Uno"}
 
 
-def following(*ahead, state="following", locked=None):
-  """The follower's state. `locked` is {route_id: [its upcoming maneuvers]}; by default every route in `ahead` with that one."""
+def following(*ahead, state="following", locked=None, chosen=None):
+  """The follower's state. `locked` is {route_id: [its upcoming maneuvers]}; by default every route in `ahead` with that one.
+  `chosen` is the follower's view of the chosen route, or None when there is no choice."""
   if locked is None:
     locked = {}
     for n in ahead:
       locked.setdefault(n["route_id"], []).append(n)
   return {"state": state, "route_id": "main", "progress_m": 500.0, "remaining_m": 3000.0, "match_m": 2.0,
           "next": ahead[0] if ahead else None, "ahead": list(ahead),
-          "locked": [{"route_id": r, "upcoming": ms} for r, ms in locked.items()]}
+          "locked": [{"route_id": r, "upcoming": ms} for r, ms in locked.items()], "chosen": chosen}
 
 
 def test_route_turn_fires_without_any_map_data():
@@ -256,3 +257,86 @@ def test_missing_advice_file_is_no_curves(tmp_path):
   bad.write_text('[{"latitude": 1}]')
   assert load_advice_curves(str(bad)) == []
 
+
+def on_chosen(*upcoming, route_id="main"):
+  return {"route_id": route_id, "on_route": True, "arrived": False, "upcoming": list(upcoming)}
+
+
+def test_chosen_rule_reads_the_chosen_route_only_while_the_car_is_on_it():
+  from openpilot.sunnypilot.mapd.curve_shadow import route_turn_chosen
+  turn, straight_on = maneuver(80), maneuver(200, kind="continue", turn_deg=0.0, route_id="alt")
+  nav = following(turn, locked={"main": [turn], "alt": [straight_on]}, chosen=on_chosen(turn))
+  assert route_turn_agreed(nav) is None and route_turn_chosen(nav)["distance_m"] == 80, "the routes part, the choice says which"
+  rec = Shadow(known_curves=[]).step(0.0, True, 35, LAT, LON, NORTH, None, None, nav)
+  assert rec["rules"] == ["route", "chosen"] and rec["chosen"]["route_id"] == "main"
+  off = {"route_id": "main", "on_route": False, "arrived": False, "upcoming": []}
+  assert route_turn_chosen(following(turn, chosen=off)) is None
+  assert route_turn_chosen(following(turn)) is None and route_turn_chosen(None) is None
+
+
+def test_nav_log_records_the_chosen_rule_and_whether_the_car_was_on_the_chosen_route():
+  log = NavLog()
+  turn, straight_on = maneuver(90), maneuver(200, kind="continue", turn_deg=0.0, route_id="alt")
+  seen = log.records(0.0, following(turn, locked={"main": [turn], "alt": [straight_on]}, chosen=on_chosen(turn)), LAT, LON, 30.0, True)
+  assert [(r["kind"], r.get("rule"), r.get("on_chosen")) for r in seen] == [("state", None, None), ("turn", "ahead", True), ("turn", "chosen", True)]
+  seen = NavLog().records(0.0, following(turn), LAT, LON, 30.0, True)
+  assert all(r["on_chosen"] is False for r in seen if r["kind"] == "turn")
+
+
+class FakeFollower:
+  def __init__(self):
+    self.given = []
+
+  def choose(self, choice):
+    self.given.append(choice)
+    return bool(choice) and choice.get("route_id") == "t1-2"
+
+
+def test_the_choice_is_taken_again_when_its_file_changes_and_marked_on_arrival(tmp_path):
+  import json
+  import os
+  from openpilot.sunnypilot.mapd.curve_shadow import ChoiceWatch
+  path, follower = tmp_path / "chosen.json", FakeFollower()
+  watch = ChoiceWatch(str(path))
+  assert watch.poll(0.0, follower) is None and follower.given == [], "no file, nothing changed"
+  path.write_text(json.dumps({"route_id": "t1-2", "chosen_by": "device"}))
+  assert watch.poll(0.5, follower) is None, "not looked at again within CHOICE_CHECK_S"
+  assert watch.poll(1.5, follower) == {"kind": "choice", "route_id": "t1-2", "chosen_by": "device", "holds": True}
+  assert watch.poll(3.0, follower) is None, "the same file"
+  path.write_text(json.dumps({"route_id": "t9-1", "chosen_by": "app"}))
+  os.utime(path, ns=(10**18, 10**18))
+  assert watch.poll(4.5, follower) == {"kind": "choice", "route_id": "t9-1", "chosen_by": "app", "holds": False}
+  path.write_text(json.dumps({"route_id": "t1-2", "chosen_by": "device"}))
+  os.utime(path, ns=(2 * 10**18, 2 * 10**18))
+  watch.poll(6.0, follower)
+  assert watch.arrived(follower) == {"kind": "choice", "route_id": "t1-2", "arrived": True}
+  assert json.loads(path.read_text())["arrived_at"][10] == "T" and follower.given[-1] is None
+  assert watch.poll(8.0, follower) is None, "its own mark is not a new choice"
+  path.unlink()
+  assert watch.poll(10.0, follower) == {"kind": "choice", "route_id": None, "chosen_by": None, "holds": False}
+
+
+def test_the_route_asks_for_its_turn_only_near_the_corner_slow_and_with_the_blinker_to_that_side():
+  from openpilot.sunnypilot.mapd.curve_shadow import route_desire
+  right = maneuver(30)
+  nav = following(right)
+  assert route_desire(nav, 20.0, "right")["source"] == "consensus"
+  assert route_desire(nav, 20.0, None) is None, "no blinker: as today"
+  assert route_desire(nav, 20.0, "left") is None, "the blinker says the other way"
+  assert route_desire(nav, 35.0, "right") is None, "too fast"
+  assert route_desire(following(maneuver(60)), 20.0, "right") is None, "the corner is still too far"
+  roundabout = maneuver(20, kind="roundabout", turn_deg=20.0)
+  assert route_desire(following(roundabout), 15.0, "right") is None, "a roundabout has no side"
+  straight_on = maneuver(200, kind="continue", turn_deg=0.0, route_id="alt")
+  parted = following(right, locked={"main": [right], "alt": [straight_on]})
+  assert route_desire(parted, 20.0, "right") is None, "the routes part and none was chosen"
+  assert route_desire({**parted, "chosen": on_chosen(right)}, 20.0, "right")["source"] == "chosen"
+
+
+def test_nav_log_records_the_desire_once_per_turn():
+  log = NavLog()
+  right = maneuver(30)
+  seen = log.records(0.0, following(right), LAT, LON, 20.0, True, "right")
+  desires = [r for r in seen if r["kind"] == "turn" and r["rule"] == "route_desire"]
+  assert [(r["source"], r["blinker"], r["distance_m"]) for r in desires] == [("consensus", "right", 30)]
+  assert not [r for r in log.records(1.0, following(maneuver(25, north_m=30)), LAT, LON, 15.0, True, "right") if r.get("rule") == "route_desire"]

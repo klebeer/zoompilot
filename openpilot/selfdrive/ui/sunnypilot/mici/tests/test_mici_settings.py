@@ -422,6 +422,7 @@ LAYOUT_TARGETS = [
   ("cruise", "CruiseLayoutMici"),
   ("display", "DisplayLayoutMici"),
   ("models", "ModelsLayoutMici"),
+  ("routes", "RoutesLayoutMici"),
   ("settings", "SettingsLayoutSP"),
   ("software", "SoftwareLayoutSP"),
   ("steering", "SteeringLayoutMici"),
