@@ -3,16 +3,17 @@ from types import SimpleNamespace
 
 import capnp
 
-from openpilot.sunnypilot.mapd.lane_map_shadow import MAX_SHIFT, sample, two_way_residual
+from openpilot.sunnypilot.mapd.lane_map_shadow import MAX_SHIFT, PARKED_EDGE_STD, sample, two_way_residual
 from openpilot.sunnypilot.mapd.map_ways import SCHEMA_PATH, MapWays, WayMatch, heading_fits
 
 LAT, LON = -0.16163, -78.49663
 NORTH, SOUTH = 0.0, 180.0
 
 
-def model(left_edge, right_edge, edge_std=0.3):
+def model(left_edge, right_edge, edge_std=0.3, right_std=None):
   edge = lambda y: SimpleNamespace(y=[y])  # noqa: E731
-  return SimpleNamespace(roadEdges=[edge(left_edge), edge(right_edge)], roadEdgeStds=[edge_std, edge_std],
+  right_std = edge_std if right_std is None else right_std
+  return SimpleNamespace(roadEdges=[edge(left_edge), edge(right_edge)], roadEdgeStds=[edge_std, right_std],
                          laneLines=[None] * 4, laneLineProbs=[0.0, 0.7, 0.05, 0.0])
 
 
@@ -51,6 +52,13 @@ def test_would_apply_is_capped_and_never_left():
   assert far_left["remaining_m"] > MAX_SHIFT and far_left["would_apply_m"] == MAX_SHIFT
   right_of_target = sample(model(-6.0, 0.5), 30, True, TWO_WAY)
   assert right_of_target["remaining_m"] < 0 and right_of_target["would_apply_m"] == 0.0
+
+
+def test_parked_guard_holds_the_shift_when_the_right_edge_is_unsure():
+  clear = sample(model(-6.5, 4.5, right_std=PARKED_EDGE_STD - 0.05), 30, True, TWO_WAY)
+  assert not clear["parked_guard"] and clear["would_apply_guarded_m"] == clear["would_apply_m"] == MAX_SHIFT
+  parked = sample(model(-6.5, 4.5, right_std=PARKED_EDGE_STD), 30, True, TWO_WAY)
+  assert parked["parked_guard"] and parked["would_apply_m"] == MAX_SHIFT and parked["would_apply_guarded_m"] == 0.0
 
 
 def test_one_way_segments_match_only_in_their_direction():
