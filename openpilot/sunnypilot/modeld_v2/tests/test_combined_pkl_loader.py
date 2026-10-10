@@ -53,6 +53,23 @@ class TestFindDrivingPkl(OpenpilotTestCase):
     assert result is not None
     assert 'driving_fof_tinygrad.pkl' in result
 
+  def test_switch_names_the_small_models_pkl(self, tmp_path, monkeypatch):
+    (tmp_path / 'driving_fof_tinygrad.pkl').write_bytes(b'fake')
+    (tmp_path / 'tuned.pkl').write_bytes(b'fake')
+    switch = tmp_path / 'switch'
+    from openpilot.common.hardware import hw
+    monkeypatch.setattr(hw.Paths, 'model_root', staticmethod(lambda: str(tmp_path)))
+    monkeypatch.setattr(modeld_module, 'PKL_SWITCH_PATH', str(switch))
+    bundle = DummyBundle(models=[DummyModel('vision', 'driving_fof_tinygrad.pkl')])
+
+    switch.write_text(f"{tmp_path / 'tuned.pkl'}\n")
+    assert _find_driving_pkl(bundle) == str(tmp_path / 'tuned.pkl')
+    assert _find_driving_pkl(bundle, chestnut=True).endswith('driving_fof_tinygrad.pkl'), "the big model keeps its own"
+    switch.write_text(str(tmp_path / 'missing.pkl'))
+    assert _find_driving_pkl(bundle).endswith('driving_fof_tinygrad.pkl'), "a pkl that is not there is ignored"
+    switch.unlink()
+    assert _find_driving_pkl(bundle).endswith('driving_fof_tinygrad.pkl')
+
 
 # Init — assertion guard
 

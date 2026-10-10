@@ -58,6 +58,9 @@ from openpilot.sunnypilot.selfdrive.controls.lib.relc import RoadEdgeLaneChangeC
 
 PROCESS_NAME = "openpilot.selfdrive.modeld.modeld_tinygrad"
 BIG_MODEL_TIMEOUT = 60
+# One line, the path of a small-model pkl to run instead of the active bundle's, keeping the bundle's overrides.
+# Read when modeld starts: remove the file to go back from the next drive.
+PKL_SWITCH_PATH = "/data/zoompilot_model_pkl"
 
 
 def _pkl_exists(path):
@@ -65,9 +68,20 @@ def _pkl_exists(path):
   return os.path.exists(path) or os.path.exists(get_manifest_path(path))
 
 
-def _find_driving_pkl(bundle):
+def _switched_pkl():
+  try:
+    with open(PKL_SWITCH_PATH) as f:
+      path = f.read().strip()
+  except OSError:
+    return None
+  return path if path and _pkl_exists(path) else None
+
+
+def _find_driving_pkl(bundle, chestnut=False):
   if (override := os.environ.get('COMBINED_MODEL_PKL')) and _pkl_exists(override):
     return override
+  if not chestnut and (switched := _switched_pkl()) is not None:
+    return switched
   if bundle is None or not bundle.models:
     return None
   from openpilot.common.hardware.hw import Paths
@@ -111,7 +125,7 @@ class ModelState(ModelStateBase):
     self.PLANPLUS_CONTROL: float = 1.0
     self.chestnut = chestnut
 
-    pkl_path = _find_driving_pkl(model_bundle)
+    pkl_path = _find_driving_pkl(model_bundle, chestnut)
     assert pkl_path is not None, f"No driving pkl found for {'chestnut' if chestnut else 'small model'} — all models must be compiled with compile_modeld.py"
     self._init_combined(pkl_path, cam_w, cam_h, model_bundle)
 
