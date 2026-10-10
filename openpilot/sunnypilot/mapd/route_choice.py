@@ -3,7 +3,7 @@
 comma-nav puts the route bundle at BUNDLE_PATH; the routes of saved trips carry the trip's name, and
 routes that end at a saved place carry it in to_place. The driver picks one of them for this trip, on
 the comma's screen (from a trip, or by where to go) or in comma-nav's page, and the choice goes to
-CHOICE_PATH (contract: comma-nav's route-choice.schema.json). curve_shadow follows it.
+CHOICE_PATH (contract: comma-nav's route-choice.schema.json). route_guide follows it.
 """
 import json
 import os

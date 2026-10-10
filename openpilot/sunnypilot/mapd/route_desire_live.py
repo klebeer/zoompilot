@@ -1,7 +1,7 @@
 """
 Route desire, live: the route's turn, confirmed by the blinker, steers.
 
-curve_shadow decides when (route_desire: the chosen route's next turn, else the one every route agrees on, the
+route_guide decides when (route_desire: the chosen route's next turn, else the one every route agrees on, the
 blinker to that same side, the corner within DESIRE_M, the car at DESIRE_KPH or slower) and publishes the side
 to SIDE_PATH. Two readers act on it while it is fresh: the blinker pause does not release the wheel for that
 side (blinker_pause_lateral), and the model is asked for the turn to that side (lane_turn_desire), as "Use Lane
@@ -19,8 +19,8 @@ from openpilot.common.hardware import PC
 
 ENABLE_PATH = os.path.expanduser("~/.comma/zoompilot_route_desire_on") if PC else "/data/zoompilot_route_desire_on"
 SIDE_PATH = os.path.expanduser("~/.comma/route_desire_side") if PC else "/dev/shm/zoompilot_route_desire"
-STALE_NS = 500_000_000      # a side older than this is ignored: curve_shadow stopped or the car is off
-REFRESH_NS = 200_000_000    # curve_shadow rewrites the side this often while it holds
+STALE_NS = 500_000_000      # a side older than this is ignored: route_guide stopped or the car is off
+REFRESH_NS = 200_000_000    # route_guide rewrites the side this often while it holds
 LATCH_S = 12.0              # longest a turn holds once asked for
 LATCH_MAX_KPH = 40.0        # and it ends above this speed: the turn is done
 
@@ -69,7 +69,7 @@ class Publisher:
 
 
 class Reader:
-  """The side curve_shadow published, if fresh. Reads the file at most every READ_EVERY_NS."""
+  """The side route_guide published, if fresh. Reads the file at most every READ_EVERY_NS."""
   READ_EVERY_NS = 50_000_000
 
   def __init__(self):
