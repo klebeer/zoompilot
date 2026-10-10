@@ -102,7 +102,8 @@ class Mic:
 
         self.measurements = self.measurements[FFT_SAMPLES:]
 
-  @retry(attempts=10, delay=3)
+  # A cold boot can take more than 30 s to bring the audio up, and a crash here leaves micd down for the whole drive.
+  @retry(attempts=40, delay=3)
   def get_stream(self, sd):
     # reload sounddevice to reinitialize portaudio
     sd._terminate()
