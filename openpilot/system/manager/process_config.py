@@ -182,6 +182,7 @@ procs += [
   NativeProcess("mapd", Paths.mapd_root(), ["bash", "-c", f"{MAPD_PATH} > /dev/null 2>&1"], mapd_ready),
   PythonProcess("mapd_manager", "openpilot.sunnypilot.mapd.mapd_manager", always_run),
   PythonProcess("mapd_logger", "openpilot.sunnypilot.mapd.mapd_logger", and_(only_onroad, mapd_ready)),
+  PythonProcess("nav_channel", "openpilot.sunnypilot.mapd.nav_channel", always_run),
   PythonProcess("route_guide", "openpilot.sunnypilot.mapd.route_guide", only_onroad),
   PythonProcess("log_archiver", "openpilot.sunnypilot.system.log_archiver", only_offroad),
 

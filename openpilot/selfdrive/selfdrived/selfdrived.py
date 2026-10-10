@@ -155,7 +155,7 @@ class SelfdriveD(CruiseHelper):
     self.rk = Ratekeeper(100, print_delay_threshold=None)
 
     # openpilot drives without these: losing one must never block engagement.
-    self.ignored_processes = {'mapd', 'mapd_logger', 'route_guide'}
+    self.ignored_processes = {'mapd', 'mapd_logger', 'nav_channel', 'route_guide'}
 
     # Determine startup event
     is_remote = build_metadata.openpilot.comma_remote or build_metadata.openpilot.sunnypilot_remote
