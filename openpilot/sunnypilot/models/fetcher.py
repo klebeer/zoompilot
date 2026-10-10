@@ -5,10 +5,12 @@ This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 """
 
+import json
 import time
 import os
 import requests
 from requests.exceptions import (SSLError, RequestException, HTTPError)
+from openpilot.common.hardware import PC
 from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
 from openpilot.common.hardware.hw import Paths
@@ -97,6 +99,29 @@ class ModelParser:
   def parse_models(json_data: dict) -> list[custom.ModelManagerSP.ModelBundle]:
     found_bundles = [ModelParser._parse_bundle(bundle) for bundle in json_data.get("bundles", [])]
     return [bundle for bundle in found_bundles if is_bundle_version_compatible(bundle.to_dict())]
+
+
+# Models built on this device, in the remote catalog's format: listed beside the remote ones for the qcom source.
+# Their files must already be in the model root with these hashes; nothing is downloaded for them.
+LOCAL_CATALOG_PATH = os.path.expanduser("~/.comma/models_local/catalog.json") if PC else "/data/models_local/catalog.json"
+
+
+def local_bundles(source: str) -> list[custom.ModelManagerSP.ModelBundle]:
+  if source != "qcom":
+    return []
+  try:
+    with open(LOCAL_CATALOG_PATH) as f:
+      return ModelParser.parse_models(json.load(f))
+  except FileNotFoundError:
+    return []
+  except Exception:
+    cloudlog.exception("local model catalog unreadable")
+    return []
+
+
+def with_local(source: str, bundles: list[custom.ModelManagerSP.ModelBundle]) -> list[custom.ModelManagerSP.ModelBundle]:
+  refs = {b.ref for b in bundles}
+  return bundles + [b for b in local_bundles(source) if b.ref not in refs]
 
 
 class ModelCache:
@@ -205,6 +230,9 @@ class ModelFetcher:
     return not any(bundle.get("is_big") is True for bundle in bundles)
 
   def get_bundles_for_source(self, source: str) -> list[custom.ModelManagerSP.ModelBundle]:
+    return with_local(source, self._remote_bundles_for_source(source))
+
+  def _remote_bundles_for_source(self, source: str) -> list[custom.ModelManagerSP.ModelBundle]:
     if source not in self.MODEL_SOURCES:
       cloudlog.warning(f"Unknown model source: {source}")
       return []
@@ -252,12 +280,12 @@ def get_cached_bundles(params: Params, source: str) -> list[custom.ModelManagerS
   _, suffix = ModelFetcher.MODEL_SOURCES[source]
   cached_data = params.get(f"ModelManager_ModelsCache{suffix}")
   if not cached_data:
-    return []
+    return local_bundles(source)
   try:
-    return ModelParser.parse_models(cached_data)
+    return with_local(source, ModelParser.parse_models(cached_data))
   except Exception as e:
     cloudlog.warning(f"Failed to parse cached models for source {source}: {e}")
-    return []
+    return local_bundles(source)
 
 
 if __name__ == "__main__":
