@@ -202,9 +202,9 @@ class TestModeld(OpenpilotTestCase):
 
 
 class TestTheBuild(OpenpilotTestCase):
-  def test_the_warp_graph_comes_before_tinygrad(self):
-    # compile_modeld patches tinygrad's firmware fetch as it loads, and the
-    # warp build makes the adapter before it asks for the graph
+  def test_making_the_adapter_leaves_tinygrad_to_the_warp(self):
+    # the warp build makes the adapter before it asks for the graph, which is
+    # tinygrad's openpilot compiler
     code = '''
 import json, sys
 from openpilot.sunnypilot import jetlink_adapter
@@ -225,10 +225,7 @@ print(json.dumps({'built': built, 'seen': seen, 'callable': callable(graph), 'si
     found = json.loads(out.stdout.strip().splitlines()[-1])
     self.assertFalse(found['built'], "making the adapter imported tinygrad")
     self.assertTrue(found['callable'] and found['size'])
-    seen = found['seen']
-    self.assertIn('openpilot.selfdrive.modeld.compile_modeld', seen)
-    first_tinygrad = next(i for i, name in enumerate(seen) if name.split('.')[0] == 'tinygrad')
-    self.assertLess(seen.index('openpilot.selfdrive.modeld.compile_modeld'), first_tinygrad)
+    self.assertIn('examples.openpilot.compile_warp', found['seen'])
 
 
 class TestTheOwner(OpenpilotTestCase):

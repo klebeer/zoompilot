@@ -157,18 +157,18 @@ class TestTheCommandBuilds(OpenpilotTestCase):
 
 class TestOnlyTheBuildCompiles(OpenpilotTestCase):
   def test_only_make_warp_imports_the_compiler(self):
-    """compile_modeld is for the build. Imported anywhere else in the adapter it
-    would bring the ~9 s compile back to modeld or a provisioning run, where it
-    was lost to ignition."""
+    """tinygrad's warp compiler is for the build. Imported anywhere else in the
+    adapter it would bring the ~9 s compile back to modeld or a provisioning
+    run, where it was lost to ignition."""
     tree = ast.parse(Path(jetlink_adapter.__file__).read_text())
     importers = set()
     for fn in ast.walk(tree):
       if isinstance(fn, ast.FunctionDef):
         for node in ast.walk(fn):
-          if isinstance(node, ast.ImportFrom) and (node.module or '').endswith('compile_modeld'):
+          if isinstance(node, ast.ImportFrom) and (node.module or '').endswith('compile_warp'):
             importers.add(fn.name)
     top = [n for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
-    self.assertFalse([n for n in top if 'compile_modeld' in ast.dump(n)])
+    self.assertFalse([n for n in top if 'compile_warp' in ast.dump(n)])
     self.assertEqual(importers, {'make_warp'})
 
 

@@ -9,8 +9,10 @@ ones do.
 
 img_q / big_img_q / feat_q / desire_q are reimplemented in numpy on the Jetson,
 and drift means the model silently sees the wrong history. Compared against
-compile_modeld's own functions over a run long enough for every ring to wrap
-twice. Here rather than in jetlink, whose CI has no openpilot to compare with.
+the tinygrad queues openpilot's modeld ran before the history moved into the
+ONNX (kept below, as modeld/compile_modeld.py had them) over a run long enough
+for every ring to wrap twice. Here rather than in jetlink, whose CI has no
+openpilot to compare with.
 """
 from __future__ import annotations
 
@@ -24,7 +26,23 @@ from jetlink.queues import PolicyQueues
 from jetlink.spec import ModelSpec
 
 from openpilot.common.test import OpenpilotTestCase
-from openpilot.selfdrive.modeld import compile_modeld
+
+
+class OldModeldQueues:
+  """The queue functions of openpilot's modeld/compile_modeld.py, as they were when it was removed."""
+
+  @staticmethod
+  def shift_and_sample(buf, new_val, sample_fn):
+    buf.assign(buf[1:].cat(new_val, dim=0).contiguous())
+    return sample_fn(buf)
+
+  @staticmethod
+  def sample_skip(buf, frame_skip):
+    return buf[::frame_skip].contiguous().flatten(0, 1).unsqueeze(0)
+
+  @staticmethod
+  def sample_desire(buf, frame_skip):
+    return buf.reshape(-1, frame_skip, *buf.shape[1:]).max(1).flatten(0, 1).unsqueeze(0)
 
 # The big (chestnut) model, as shipped: 4-D features_buffer, 33-step desire.
 BIG_SHAPES = {
@@ -78,12 +96,12 @@ class TinygradReference:
 
   def step(self, warped: np.ndarray, desire: np.ndarray, prev_feat: np.ndarray):
     w = Tensor(warped)
-    img = compile_modeld.shift_and_sample(self.img_q, w[0:1], lambda b: compile_modeld.sample_skip(b, self.fs))
-    big = compile_modeld.shift_and_sample(self.big_img_q, w[1:2], lambda b: compile_modeld.sample_skip(b, self.fs))
-    des = compile_modeld.shift_and_sample(self.desire_q, Tensor(desire).reshape(1, 1, -1),
-                                          lambda b: compile_modeld.sample_desire(b, self.fs))
-    feat = compile_modeld.shift_and_sample(self.feat_q, Tensor(prev_feat).reshape(1, 1, -1),
-                                           lambda b: compile_modeld.sample_skip(b, self.fs))
+    img = OldModeldQueues.shift_and_sample(self.img_q, w[0:1], lambda b: OldModeldQueues.sample_skip(b, self.fs))
+    big = OldModeldQueues.shift_and_sample(self.big_img_q, w[1:2], lambda b: OldModeldQueues.sample_skip(b, self.fs))
+    des = OldModeldQueues.shift_and_sample(self.desire_q, Tensor(desire).reshape(1, 1, -1),
+                                           lambda b: OldModeldQueues.sample_desire(b, self.fs))
+    feat = OldModeldQueues.shift_and_sample(self.feat_q, Tensor(prev_feat).reshape(1, 1, -1),
+                                            lambda b: OldModeldQueues.sample_skip(b, self.fs))
     return (img.numpy(), big.numpy(), des.numpy(), feat.numpy())
 
 

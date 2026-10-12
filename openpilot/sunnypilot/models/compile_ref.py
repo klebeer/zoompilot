@@ -11,17 +11,12 @@ import os
 
 from openpilot.common.basedir import BASEDIR
 
-# the scripts that write the driving and dm warp pkls, repo-relative. one list for scons
-# (modeld/SConscript rebuilds on them) and for CI (the prebuilt workflow keys the HF defaults
-# on them next to tinygrad_ref), so a pkl cannot outlive the script that wrote it.
+# the repo's own inputs to the driving and dm warp pkls, repo-relative, for CI (the prebuilt
+# workflow keys the HF defaults on them next to tinygrad_ref). The compilers themselves are
+# tinygrad_repo/examples/openpilot, which tinygrad_ref covers.
 # nothing heavier than basedir is imported here: the CI resolve jobs run it on a bare runner
-MODELD_COMPILE_SCRIPTS = (
-  'openpilot/selfdrive/modeld/compile_modeld.py',
-  'openpilot/selfdrive/modeld/get_model_metadata.py',
-  'openpilot/system/camerad/cameras/nv12_info.py',
-  'openpilot/common/hardware/hw.py',
-)
-DM_WARP_COMPILE_SCRIPTS = ('openpilot/selfdrive/modeld/compile_dm_warp.py',)
+MODELD_COMPILE_SCRIPTS = ('openpilot/system/camerad/cameras/nv12_info.py',)
+DM_WARP_COMPILE_SCRIPTS: tuple[str, ...] = ()
 COMPILE_SCRIPTS = MODELD_COMPILE_SCRIPTS + DM_WARP_COMPILE_SCRIPTS
 
 

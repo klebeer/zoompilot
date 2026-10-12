@@ -36,13 +36,13 @@ if arch == 'comma_arm64' and os.path.isfile(capture):
   model_w, model_h = MEDMODEL_INPUT_SIZE
   prebuilt = bool(os.getenv('PREBUILT_ALL_CAMERAS'))
 
+  # tinygrad_repo/examples/openpilot/compile_warp.py, comma's warp graph, is among these
   tinygrad_files = ["#" + x for x in glob.glob(env.Dir("#tinygrad_repo").relpath + "/**",
                                                recursive=True, root_dir=basedir)
                     if 'pycache' not in x and os.path.isfile(os.path.join(basedir, x))]
   script_files = [
     File(capture),                                           # the capture, and call_warp, which names the inputs
     File("#openpilot/sunnypilot/jetlink_adapter/__init__.py"),  # make_warp, and where the warp goes
-    File("#openpilot/selfdrive/modeld/compile_modeld.py"),   # comma's warp graph
     File("#openpilot/system/camerad/cameras/nv12_info.py"),  # the frame layout the graph indexes
   ]
 

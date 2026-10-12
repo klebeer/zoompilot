@@ -199,11 +199,22 @@ class Adapter:
   # -- the build --------------------------------------------------------------
 
   def make_warp(self, cam_w: int, cam_h: int, model_w: int, model_h: int):
-    # compile_modeld first: it patches tinygrad's firmware fetch as it loads
-    from openpilot.selfdrive.modeld.compile_modeld import NV12Frame, make_warp
+    # the frame prepare modeld/SConscript compiles into driving_warp_*: tinygrad's openpilot compiler,
+    # on the build's path from tinygrad_repo. Called the way jetlink.openpilot.warp.call_warp calls it
+    from examples.openpilot.compile_warp import NV12Frame, make_frame_prepare
+    from tinygrad.device import Device
+    from tinygrad.tensor import Tensor
+
     from openpilot.system.camerad.cameras.nv12_info import get_nv12_info
     nv12 = NV12Frame(cam_w, cam_h, *get_nv12_info(cam_w, cam_h))
-    return make_warp(nv12, model_w, model_h), nv12.size
+    frame_prepare = make_frame_prepare(nv12, model_w, model_h)
+
+    def warp(tfm, big_tfm, frame, big_frame):
+      tfm, big_tfm, frame, big_frame = (t.to(Device.DEFAULT) for t in (tfm, big_tfm, frame, big_frame))
+      Tensor.realize(tfm, big_tfm, frame, big_frame)
+      return Tensor.cat(frame_prepare(frame, tfm).unsqueeze(0), frame_prepare(big_frame, big_tfm).unsqueeze(0))
+
+    return warp, nv12.size
 
 
 # -- what the hooks call ------------------------------------------------------
