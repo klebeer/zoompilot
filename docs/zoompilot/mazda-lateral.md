@@ -10,11 +10,13 @@ LKAS_REQUEST (the request it received), LKAS_EFFECTIVE (what it applied) and LKA
 
 ## 2022 EPS detection and the STEER_TO_ZERO_EPS flag
 
-Older Mazdas are dashcam only for one reason: their EPS locks steering out after about 5 s of
-hands-off and below 45 kph (LKAS_LIMITS: disabled going down through 45 kph, re-enabled going up
-through 52 kph, and the LKAS_BLOCK bit lags the speed on the way up). That is a property of the
-EPS, not of the car. The 2022 CX-5 EPS can steer to zero and has no hands-off lockout, so a car
-with that EPS swapped in is controllable and lifts out of dashcam with it.
+Older Mazda EPS firmware locks steering out after about 5 s of hands-off and below 45 kph
+(LKAS_LIMITS: disabled going down through 45 kph, re-enabled going up through 52 kph, and the
+LKAS_BLOCK bit lags the speed on the way up). That is a property of the EPS, not of the car.
+Upstream keeps those cars dashcam only; here every Mazda platform steers above the floor and a
+lockout surfaces as `steerFaultTemporary`. No stock CX-5 KE EPS has been logged yet, so the first
+stock KE install shows whether it steers at all. The 2022 CX-5 EPS can steer to zero and has no
+hands-off lockout, so a car with that EPS swapped in loses the floor too.
 
 `MazdaFlags.STEER_TO_ZERO_EPS` is therefore set from the EPS firmware (`STEER_TO_ZERO_EPS_FW`:
 KBST-3210X-A-00 and KSD5-3210X-C-00, the CX-5 2022 EPS block in fingerprints.py) or from the
@@ -95,18 +97,14 @@ and 1 at a margin of 1, while 2 leaves none at either 30 or 50 ms. It costs 30 c
 which widens the frames the ceiling actually trims from 2.1% to 3.0% on those two
 driver-fighting routes.
 
-## Speed-dependent STEER_MAX
+## STEER_MAX
 
 `STEER_MAX` is the scale from the controller's normalized output to CAN counts
-(`new_torque = actuators.torque * steer_max`), not just a ceiling, and latAccelFactor is
-proportional to it. Changing it rescales every sub-saturation command and invalidates every
-`speed_dependent.toml` LAF seed at once, so it is left alone and the EPS's real ceiling is
-enforced separately (next section).
-
-`STEER_MAX_LOOKUP` is 1200 up to 14.2 m/s and 800 from 14.5 m/s (about 32 mph): 1200 below for
-full low-speed authority and feedforward overshoot, 800 above for smoother highway steering.
-Speed-dependent STEER_MAX is only applied on the 2022 EPS; the pre-2022 path uses upstream's
-constant 800.
+(`new_torque = actuators.torque * STEER_MAX`), not just a ceiling, and latAccelFactor is
+proportional to it. It is 1200 at every speed on the EPS envelope, the panda's `max_torque`;
+the EPS's real ceiling is enforced separately (next section). Values fitted on upstream's 800
+convert once through `TUNE_SCALE`; why the 1200 -> 800 step it replaced (2026-09-30) is gone:
+`lateral-tune.md`, "One STEER_MAX, and the tune scale".
 
 ## EPS ceiling clamp
 
@@ -264,6 +262,56 @@ from. The speed is read once, when the alert arms, so a car accelerating out of 
 never lets go still gets told (route 00000148 crossed 5.9 to 7.6 m/s with zero delivery), while
 one hovering at the threshold does not flicker.
 
+## The car's own lane keep switched off (built 2026-10-03, on-car pending)
+
+The EPS applies no LKAS torque while the car's lane keep is off, so with MADS on that state is
+`stockLkasOff` (from `invalidLkasSetting`: CAM_SETTINGS both intervention bits clear, or
+CAM_LANEINFO LANE_LINES 0). On a CX-5 2022 the LAS switch is the LANE_LINES path: every one of
+16 edges on routes 0000024d, 00000251 and 0000027c came 0.02 to 0.05 s after a press on 0x9e
+MSG_05 byte 1 bit 0, and across 66 h of drives LANE_LINES never read 0 without such a press or
+without ERR_BIT (faded lanes read 1). The CAM_SETTINGS path is the one route 00000105 showed,
+toggled by the wheel's TJA button.
+
+**It pauses lateral, it does not disable it.** The first build (2026-09-25) disabled MADS. The
+panda then dropped its own lateral three heartbeats later (`mads_heartbeat_engaged_check`, fed
+`selfdriveStateSP.mads.enabled`) and only re-arms on an ACC main, MADS button or cruise-engage
+rising edge, so a software resume would be refused and the only way back was a cruise cycle.
+Now `mads.py update_stock_lkas` pauses an enabled MADS (`silentLkasDisable`), cruise engaged or
+not. MADS stays enabled, the panda keeps lateral allowed, and `stockLkasOff` sits in
+`GEARS_ALLOW_PAUSED_SILENT`, which blocks the paused state's silent resume while it holds. LKA
+back on clears it and the paused state resumes on its own, with no cruise cycle and no button. A
+request for lateral while LKA is off (MADS button, main-on, unified engagement) enters paused the
+same way and is refused aloud ("Lateral Disabled / LKAS is off"), so it starts when LKA does. A
+disable in the same frame (the MADS button, main off, the brake under disengage-on-brake) wins
+over the pause, and so does a later one, because a paused MADS is still enabled.
+
+**Telling the driver.** mici shows a standing "Lateral Disabled / LKAS is off" alert (PERMANENT,
+`Priority.LOW`, silent) for as long as LKA is off. tizi has no alert: its border already shows
+lateral off. MADS publishes the hold as `selfdriveStateSP.mads.lateralHeld` and
+`UIStateSP.update_status` reads it as MADS off, so the border (and mici's status dot) stays
+purple under cruise and blue without, not the override grey of a brake pause.
+
+**The EPS re-arms.** When LKA comes back on, the EPS holds LKAS_BLOCK with TRACK_STATE (byte 6
+0x14) for 3.00 to 3.08 s from the edge, then takes torque 0.02 to 0.38 s later. That is 7 edges:
+routes 0000024d and 00000105, plus the camera's ERR recovery on 00000043, which re-arms the same
+way. The timer ran with a zero request (0000024d, latched through it) and was not restarted by a
+second edge inside it. An ordinary engagement at speed has no such block: 1 of 41 first
+engagements above 15 m/s had one, and delivery took a 0.05 s median.
+
+Carstate's `lkas_arming` is set on the edge and ends when the block reads clear at
+`LKAS_REARM_T` (3.0 s) or later, or when the EPS delivers anything sooner. A clear block before
+3 s is only the gap before the block rises (00000105: clear while off, set 0.02 s after the
+edge). Delivery alone would be a poor end, because the EPS rounds requests under
+`STEER_UNDELIVERED_MIN` to nothing on a straight road. Card publishes the flag as
+`CarStateZP.lkasArming`. While MADS is enabled it raises `stockLkasArming`, which on mici is
+"Lateral Disabled / Waiting for steering", and `lateralHeld` stays set until it clears. Lateral itself resumes at the edge, because the EPS only lifts the block with our frames
+reaching it. While openpilot was not steering, the block stayed up (0x04) until it did, or until
+the camera read LANE_LINES 2. Through the re-arm the 2022 latch zeroes the request and stays
+silent (TRACK_STATE). The older EPS reports LKAS_BLOCK at road speed as `steerFaultTemporary`,
+a soft disable that would cost MADS the lateral it is handing back, so `steerFaultTemporary` is
+held false for `LKAS_REARM_FAULT_T` (4 s) from the edge. After that, a block is a fault again.
+The older EPS's re-arm is not in the corpus.
+
 ## LKAS_FAULT and the camera's ERR_BIT_1
 
 The camera's ERR_BIT_1 ("LKAS Fault: Restart the Car", the cluster's "Front Camera Sensor System
@@ -354,10 +402,20 @@ camera is pressed off, steering or not. The panda accepts the byte-exact bus-2 f
 state (it only reaches the camera and can only toggle its lane centering). The stockLkas
 warning still fires only while openpilot steers.
 
-MRCC becoming armed on the first press is the button's stock behaviour and is left alone. It is
-armed, not engaged; SET still has to be pressed. No MRCC-off spoof on bus 0.
+MRCC becoming armed on the first press is the button's stock behaviour. It is armed, not
+engaged; SET still has to be pressed. From 2026-09-18 the controller also undoes the arm when
+MRCC was off before the press (below): the arm is a side effect of a button the driver declared
+as the lateral switch, and it starves the white wheel of its cruise-off window.
 
-**1. Camera press on bus 2** (`CarController.update_camera_tja`, opendbc b697d69be6). Carstate
+**REMOVED 2026-09-25 (opendbc a02b4a5415).** The bus-2 press is the car's own lane-keep switch:
+route 7c735af5fce56485/00000105 (2026-09-12) drove with CAM_SETTINGS `LKAS_INERVENTION_ON1` 0
+after the controller pressed the camera's button, and the EPS applied none of our request with
+no block and no fault. openpilot now never writes CRZ_BTNS on bus 2 (the panda refuses it), and
+the setting is read into `invalidLkasSetting` (both intervention bits clear, or LANE_LINES 0).
+With MADS on that holds lateral only (`stockLkasOff`, paused until LKA is back: "The car's own
+lane keep switched off" above); with MADS off it stays upstream's whole-system no-entry. The design below is kept as history.
+
+**1. Camera press on bus 2** (`CarController.update_camera_tja`, opendbc b697d69be6, removed). Carstate
 reads `stock_tja` live off the parsed 0x440 (0 when the camera is stale, never latched: the
 camera drops its own arm, seg 9 +470 ms). Whenever `stock_tja != 0`, ONE CRZ_BTNS
 on bus 2 with `TJA_BUTTON` set, `CTR = crz_btns_counter + 1`, every other byte the wheel's idle
@@ -392,10 +450,10 @@ the software's MADS stayed on (a controls mismatch, our torque refused), and the
 row would be false. Undeclared cars stay byte-identical (`TestMazdaTjaMads`, the mads.py A/B
 tests).
 
-**4. White HUD.** Not built (2026-09-09 decision). Our 0x440 keeps TJA 0. If revisited: pack
-`TJA = 2` under `mads.enabled`, `stock_tja == 0`, no visual alert, never 3 to 5, and bench
-first that TJA 2 from us with MRCC off does not arm MRCC (chinna244's finding that the body
-consumes the field).
+**4. White HUD.** Built 2026-09-18 on the decision's terms (below): `TJA = 2` only, under
+`mads.enabled` with the camera idle and no visual alert, never 3 to 5, with chinna244's
+finding as the load-bearing constraint — the body reads the field, so the frame allowlist and
+the fail-closed default are the design, not belt-and-suspenders.
 
 **5. Handover checks on the car.** MADS off by the button with cruise engaged at speed: our
 0x243 is vetoed the frame lateral falls and the camera's flows; measure the EPS echo across the
@@ -420,13 +478,114 @@ long); carstate `TestStockTja` (live, stale, the one-shot pulse) and `TestTjaBut
 long); `test_camera_tja_press_bytes`; the golden tx unchanged; mads `TestMadsTjaButton`;
 `TestMazdaStockCtsEvents` (WARNING only).
 
+### The press-induced MRCC arm and the undo (built 2026-09-18, merged 2026-09-25, opendbc 74fdc8686f)
+
+The arm cannot be prevented: the wheel's TJA frame reaches every bus-0 ECU directly, and PEDALS
+reflects it ~80 ms after the press edge. Left standing, it is cruise armed by a button the
+driver declared as the lateral switch, and it holds `mrcc off` false so the white wheel below
+never displays after the first press. When MRCC was OFF before the press, the controller
+answers with the driver's own MRCC master press. The pre-press sample is carstate's previous
+stable state, because PEDALS can show the arm in the same cycle as the edge.
+
+- The frame is the wheel's exact master-press shape: every button idle, `BIT1` low, byte
+  signature `00 81 fe Cx` with only `CTR` variable (`create_mrcc_off_cmd`). The panda accepts
+  it only on a declared car while the live arm is up (`mazda_acc_armed`: CRZ_CTRL bit 17 stock,
+  PEDALS bits after teardown). A lookalike that is not the exact shape is refused in every
+  state, so a composite command cannot borrow the cancel exception.
+- One press per 200 ms slot, at most three per unreconciled arm. 200 ms is both the body's
+  discrete-press ceiling (icbm.md: taps past ~5 Hz are dropped) and the stand-down pace: the
+  disarm reaches PEDALS ~80 ms after a press plus the 50 ms confirm, so the next slot reads the
+  cleared state. Nothing sends while PEDALS reads disarmed, where a master press would arm
+  instead of disarm.
+- Stand-downs: any wheel button (the driver's own cruise presses own the stream), the held TJA
+  press, a radar or stock-ECU session transition, and openpilot's own cancel or resume (waited
+  out, not aborted). Five raw-off frames confirm the arm is gone. If no arm ever appears, the
+  undo gives up after 1 s of brake-free time — PEDALS holds both cruise bits low under braking,
+  so the clock runs brake-free cycles only.
+- ICBM stays suppressed for the whole TJA hold: the wheel's press pattern owns the CRZ_BTNS
+  counter stream until release. The physical master press also publishes as a `mainCruise`
+  button event (latched against the parser's startup zeros), which the ICBM readiness gate in
+  the openpilot tree consumes: a held master press freezes ICBM's synthesized presses.
+
+Undeclared cars ship byte-identical: no parse, no undo, no safety exception. Tests:
+`TestMrccUndo` and `TestMrccUndoShipsDark` in `test_mazda_tja_press.py`,
+`TestMrccButtonEvent`, and `TestMazdaMrccOffCleanup` on the safety side.
+
+### The white wheel (built 2026-09-18, merged 2026-09-25, opendbc dbd88fa682)
+
+With the camera's own TJA off the dash has no steering telltale while openpilot steers: the
+camera's 0x440 TJA reads 0, and ours stays 0. The white wheel draws it again on the camera's
+own HUD frame. At the 2 Hz alert cadence, when the camera's current CAM_LANEINFO payload is
+exactly an allowlisted idle base, `TJA = 2` is XORed in (`apply_mads_white_hud`). Anything
+else — an unknown or stale camera frame, a payload off the allowlist — passes through
+untouched.
+
+Display needs all of: `MazdaTjaButton` declared, MADS active, the camera frame live, no active
+visual alert, no wheel button activity (TJA, the MRCC master, SET+/-, RES, DISTANCE, ICBM's
+synthesized presses, openpilot's cancel/resume), and cruise verifiably off — raw PEDALS low,
+the filtered available and enabled low, and no radar or stock-ECU session transition — held
+for 0.5 s (`MADS_WHITE_HUD_OFF_CONFIRM_FRAMES`). A state that turns unsafe is withdrawn on the
+spot, outside the cadence. TJA 2 is not display-only; the body reads the same frame, which is
+why the allowlist and the fail-closed default are the design (chinna244's finding, kept from
+the 2026-09-09 note above).
+
+The MRCC undo above is what makes the window reachable: without it, the press-induced arm
+keeps cruise-off false after the first press. Tests: `TestShipsDark` and `TestWhiteWheelGate`
+in `test_mazda_mads_white_wheel.py`, plus the mazdacan allowlist and interface raw-latch
+tests.
+
+### The hands-on-wheel frame (mapped on the car 2026-09-30, route 00000267)
+
+Every alert with the `steerRequired` icon (saturation, driver monitoring, the quiet EPS-standby
+banner, the disable alerts) also goes to the car's own dash as the hands-on-wheel code in
+0x440, at the 2 Hz alert cadence and only above the LKAS speed floor. Which bits draw the text
+was mapped by cycling four codes under cruise at 28-47 mph, 6 s on and 6 s off, and matching
+the driver's clock against the frames in the rlog:
+
+| 0x440 code | radar echo (`CRZ_CTRL`) | cluster |
+| --- | --- | --- |
+| `HANDS_WARN_3_BITS=7` + `HANDS_ON_STEER_WARN` + `HANDS_ON_STEER_WARN_2` (the frame since March) | `HANDS_OFF_STEERING=1`, nibble 9 | text, 4 of 4 |
+| `HANDS_ON_STEER_WARN` + `HANDS_ON_STEER_WARN_2` | nibble 9, no hands-off | nothing |
+| `HANDS_WARN_3_BITS=7` + `HANDS_ON_STEER_WARN` | hands-off, nibble 1 | nothing |
+| `HANDS_ON_STEER_WARN_2` alone | nibble 8 | nothing |
+| `HANDS_ON_STEER_WARN` alone (shipped 09-29 to 09-30) | nibble 1 | nothing, route 00000260 |
+
+The radar copies 0x440 byte 7's low nibble into `CRZ_CTRL.HANDS_ON_STEER_WARN` and raises
+`HANDS_OFF_STEERING` on the 0b111 code; the text needs the code and bit 59 together, so the
+radar's hands-off state comes with it. It is a status flag: across 115 logged runs with it set
+the radar's accel command never dropped, cruise never cancelled and the master cylinder never
+moved. The camera's own frames with `HANDS_ON_STEER_WARN` are lane-departure warnings, not a
+hands-off warning: bit 57 and bit 58 are `LDW_WARN_LL` / `LDW_WARN_RL` as the DBC says (79 of 79
+left-bit onsets 0.9 m from the left line, 63 of 63 right-bit onsets from the right). Nothing in
+the corpus shows a stock hands-off frame, so the frame above is the only one known to draw.
+
+Two traps for anyone repeating this. The panda drops our 0x243/0x440 and forwards the camera's
+own whenever openpilot is not controlling (`mazda_openpilot_controlling`), so a parked injection
+with card stopped puts nothing on the bus and the src 128 echoes are the camera's frames.
+Parked, the radar also reports cruise unavailable and mirrors nothing. The map has to be
+driven, with cruise or MADS lateral on.
+
+`DashSteerWarning` (carcontroller.py) decides when the frame goes out. The device alert is the
+primary channel and is untouched. The dash mirrors it under cruise and under MADS-only alike,
+with three rules from the corpus (264 warning windows). It goes out only while openpilot is
+steering (`latActive`), which already keeps it off the dash at a standstill and through an EPS
+block, where openpilot drops lateral for the banner's duration. It never starts inside the 2 s
+quiet window after lateral or cruise comes on: the driver is on the button, and the EPS-standby
+banner outlives the block that raised it, which is how it reached the dash on about 1 in 25
+engagements. And once the driver cancels or touches the brake while the alert is up it is
+withdrawn at once and stays down until the alert clears. Anything the last frame asserted
+comes down outside the cadence, the same path as the white wheel. Tests:
+`test_mazda_dash_warning.py`; the golden capture moved one frame (the slot inside the window of
+the engaged steer ramp). Open: whether the cluster chime is louder with cruise off than on;
+logs cannot record it, and the four mapped alerts were all under cruise.
+
 ## Constants
 
 | Constant | Value | Measurement | Routes |
 | --- | --- | --- | --- |
 | `STEER_STEP` | 1 (100 Hz) | EPS slews 12 counts per 10 ms whatever the command cadence | stock camera drive census |
-| `STEER_MAX` | 1200 | scale of normalized torque to counts; LAF seeds depend on it | design |
-| `STEER_MAX_LOOKUP` | 1200 to 14.2 m/s, 800 from 14.5 m/s | low-speed authority vs highway smoothness | on-car tuning |
+| `STEER_MAX` | 1200 at every speed | scale of normalized torque to counts; LAF seeds depend on it | design |
+| `TUNE_STEER_MAX` / `TUNE_SCALE` | 800 / 1.5 | upstream's scale: params.toml tunes, manual override, NNLC models convert x / 1.5 | design |
 | `STEER_DELTA_UP` / `STEER_DELTA_DOWN` | 12 / 12 | delivered step p99 and p99.9 of 12, 11.7M frames | corpus; CX-9 2021 62k; CX-5 2022 318k |
 | `max_rt_delta` (panda) | 384 | 32 x max_rate_up, upstream's ratio | derived |
 | `STEER_DRIVER_MULTIPLIER` | 15 | tuned for the 2022 EPS (upstream 1) | on-car tuning |
@@ -442,6 +601,7 @@ long); `test_camera_tja_press_bytes`; the golden tx unchanged; mads `TestMadsTja
 | `steerActuatorDelay` | 0.14 s (2022 EPS) / 0.1 s | lagd 0.338 total on a CX-5 2022 | corpus |
 | `steerRatio` (CX-5 2022) | 18.1 | paramsd learner, 2.9M samples | corpus |
 | `LKAS_LIMITS.DISABLE_SPEED` / `ENABLE_SPEED` | 45 / 52 kph | pre-2022 EPS lockout hysteresis | upstream |
+| `DASH_STEER_WARNING_QUIET_FRAMES` | 200 (2 s) | the EPS-standby banner at engagement lasts 1.8 s; 38 of 65 warning windows with a state change inside were it | corpus, 264 windows |
 
 ## Tried and rejected
 

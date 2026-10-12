@@ -6,10 +6,12 @@ See the LICENSE.md file in the root directory for more details.
 """
 from enum import IntEnum
 
+from openpilot.selfdrive.ui.sunnypilot.layouts.settings.alpha_longitudinal_toggles import AlphaLongitudinalToggles
 from openpilot.selfdrive.ui.sunnypilot.layouts.settings.cruise_sub_layouts.speed_limit_settings import SpeedLimitSettingsLayout
 from openpilot.selfdrive.ui.ui_state import ui_state
-from openpilot.sunnypilot.selfdrive.car.intelligent_cruise_button_management.controller import DECEL_OVERSHOOT_PARAMS
+from openpilot.sunnypilot.selfdrive.car.intelligent_cruise_button_management.helpers import icbm_applicable, icbm_moves_speed_limits
 from openpilot.system.ui.lib.multilang import tr, tr_noop
+from openpilot.system.ui.sunnypilot.lib.styles import style
 from openpilot.system.ui.sunnypilot.widgets.list_view import toggle_item_sp, option_item_sp, simple_button_item_sp
 from openpilot.system.ui.widgets import Widget
 from openpilot.system.ui.widgets.scroller_tici import Scroller
@@ -23,7 +25,7 @@ class PanelType(IntEnum):
 ICBM_DESC = tr_noop("When enabled, zoompilot will attempt to manage the built-in cruise control buttons " +
                     "by emulating button presses for limited longitudinal control.")
 ICMB_UNAVAILABLE = tr_noop("Intelligent Cruise Button Management is currently unavailable on this platform.")
-ICMB_UNAVAILABLE_LONG_AVAILABLE = tr_noop("Disable the zoompilot Longitudinal Control (alpha) toggle to allow Intelligent Cruise Button Management.")
+ICMB_UNAVAILABLE_LONG_AVAILABLE = tr_noop("Disable the Alpha Longitudinal toggle to allow Intelligent Cruise Button Management.")
 ICMB_UNAVAILABLE_LONG_UNAVAILABLE = tr_noop("zoompilot Longitudinal Control is the default longitudinal control for this platform.")
 
 ACC_ENABLED_DESCRIPTION = tr_noop("Enable custom Short & Long press increments for cruise speed increase/decrease.")
@@ -37,6 +39,7 @@ class CruiseLayout(Widget):
     super().__init__()
     self._current_panel = PanelType.CRUISE
     self._speed_limit_layout = SpeedLimitSettingsLayout(lambda: self._set_current_panel(PanelType.CRUISE))
+    self._alpha_long = AlphaLongitudinalToggles()
 
     items = self._initialize_items()
     self._scroller = Scroller(items, line_separator=True, spacing=0)
@@ -49,21 +52,14 @@ class CruiseLayout(Widget):
       param="IntelligentCruiseButtonManagement")
 
     self.scc_v_toggle = toggle_item_sp(
-      title=tr("Smart Cruise Control - Vision"),
+      title=tr("Slow for Curves: Vision"),
       description=tr("Use vision path predictions to estimate the appropriate speed to drive through turns ahead."),
       param="SmartCruiseControlVision")
 
     self.scc_m_toggle = toggle_item_sp(
-      title=tr("Smart Cruise Control - Map"),
+      title=tr("Slow for Curves: Map"),
       description=tr("Use map data to estimate the appropriate speed to drive through turns ahead."),
       param="SmartCruiseControlMap")
-
-    self.scc_do_toggle = toggle_item_sp(
-      title=tr("Smart Cruise Control - Deceleration Overshoot (Alpha)"),
-      description=tr("Temporarily set the cruise speed below the Smart Cruise target during slowdowns so the " +
-                     "stock ACC delivers the requested deceleration, then restore it as the car slows. " +
-                     "Only available on vehicles with a measured ACC response curve."),
-      param="SmartCruiseDecelOvershoot")
 
     self.custom_acc_toggle = toggle_item_sp(
       title=tr("Custom ACC Speed Increments"),
@@ -90,17 +86,11 @@ class CruiseLayout(Widget):
       callback=lambda: self._set_current_panel(PanelType.SLA)
     )
 
-    self.dec_toggle = toggle_item_sp(
-      title=tr("Enable Dynamic Experimental Control"),
-      description=tr("Enable toggle to allow the model to determine when to use zoompilot ACC or zoompilot End to End Longitudinal."),
-      param="DynamicExperimentalControl")
-
     items = [
+      *self._alpha_long.items,
       self.icbm_toggle,
-      self.dec_toggle,
       self.scc_v_toggle,
       self.scc_m_toggle,
-      self.scc_do_toggle,
       self.custom_acc_toggle,
       self.custom_acc_short_increment,
       self.custom_acc_long_increment,
@@ -117,6 +107,7 @@ class CruiseLayout(Widget):
   def show_event(self):
     self._set_current_panel(PanelType.CRUISE)
     self._scroller.show_event()
+    self._alpha_long.refresh()
     self.icbm_toggle.show_description(True)
     self.custom_acc_toggle.show_description(True)
 
@@ -127,12 +118,13 @@ class CruiseLayout(Widget):
 
   def _update_state(self):
     super()._update_state()
+    self._alpha_long.update_state()
 
     if ui_state.CP is not None and ui_state.CP_SP is not None:
       has_icbm = ui_state.has_icbm
       has_long = ui_state.has_longitudinal_control
 
-      if ui_state.CP_SP.intelligentCruiseButtonManagementAvailable and not has_long:
+      if icbm_applicable(ui_state.CP, ui_state.CP_SP):
         self.icbm_toggle.action_item.set_enabled(ui_state.is_offroad())
         self.icbm_toggle.set_description(tr(ICBM_DESC))
       else:
@@ -151,24 +143,15 @@ class CruiseLayout(Widget):
           self.icbm_toggle.set_description(new_desc)
           self.icbm_toggle.show_description(True)
 
-      # decel overshoot drives the stock ACC through ICBM; needs a measured per-brand plant map
-      overshoot_available = has_icbm and ui_state.CP.brand in DECEL_OVERSHOOT_PARAMS
-      self.scc_do_toggle.action_item.set_enabled(overshoot_available)
-      if not overshoot_available:
-        ui_state.params.remove("SmartCruiseDecelOvershoot")
+      icbm_sla = icbm_moves_speed_limits(has_long, has_icbm, ui_state.speed_limit_mode)
+      self.sla_settings_button.set_right_value(tr("icbm") if icbm_sla else "", style.GREEN)
 
       if has_long or has_icbm:
         self.custom_acc_toggle.action_item.set_enabled(((has_long and not ui_state.CP.pcmCruise) or has_icbm) and ui_state.is_offroad())
-        self.dec_toggle.action_item.set_enabled(has_long)
         self.scc_v_toggle.action_item.set_enabled(True)
         self.scc_m_toggle.action_item.set_enabled(True)
       else:
-        ui_state.params.remove("CustomAccIncrementsEnabled")
-        ui_state.params.remove("DynamicExperimentalControl")
-        ui_state.params.remove("SmartCruiseControlVision")
-        ui_state.params.remove("SmartCruiseControlMap")
         self.custom_acc_toggle.action_item.set_enabled(False)
-        self.dec_toggle.action_item.set_enabled(False)
         self.scc_v_toggle.action_item.set_enabled(False)
         self.scc_m_toggle.action_item.set_enabled(False)
 
@@ -184,7 +167,7 @@ class CruiseLayout(Widget):
       show_custom_acc_desc = True
     else:
       if has_long or has_icbm:
-        if has_long and ui_state.CP.pcmCruise:
+        if has_long and ui_state.CP.pcmCruise and not has_icbm:
           new_custom_acc_desc = tr(ACC_PCMCRUISE_DISABLED_DESCRIPTION)
           show_custom_acc_desc = True
         else:

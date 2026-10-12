@@ -17,6 +17,7 @@ from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.helpers import set_
 import openpilot.system.sentry as sentry
 
 from openpilot.sunnypilot.sunnylink.statsd import STATSLOGSP
+from openpilot.sunnypilot.selfdrive.car.intelligent_cruise_button_management.helpers import icbm_applicable
 
 
 def log_fingerprint(CP: structs.CarParams) -> None:
@@ -36,7 +37,7 @@ def _seed_mazda_torque_defaults(CP: structs.CarParams, params: Params | None = N
   legacy firmware on the same hardware are covered.
   Both seeds sit behind markers, because manager_init materializes every declared default at
   boot: TorqueControlTune is already 0.0 on disk by the time card runs, so "unset" never
-  survives to here. The three toggles are seeded once behind MazdaTorqueDefaultsApplied. The
+  survives to here. The two toggles are seeded once behind MazdaTorqueDefaultsApplied. The
   tune is seeded once per value of MAZDA_STEER_TO_ZERO_TORQUE_TUNE, recorded in
   MazdaTorqueTuneSeeded, so a later bump moves everyone again while a choice made after the
   seed is kept. TorqueControlTune's declared default stays 0.0 for every other brand.
@@ -55,9 +56,8 @@ def _seed_mazda_torque_defaults(CP: structs.CarParams, params: Params | None = N
 
   params.put_bool("EnforceTorqueControl", True)     # torque lateral control
   params.put_bool("LiveTorqueParamsToggle", True)   # self-tune (live torque params)
-  params.put_bool("SpeedDependentTorqueToggle", True)  # per-speed-bin learning
   params.put_bool("MazdaTorqueDefaultsApplied", True)
-  cloudlog.warning("Seeded steer-to-zero Mazda torque-control defaults (EnforceTorqueControl, self-tune, speed-dependent)")
+  cloudlog.warning("Seeded steer-to-zero Mazda torque-control defaults (EnforceTorqueControl, self-tune)")
 
 
 def seed_car_defaults_offroad(params: Params) -> None:
@@ -111,7 +111,7 @@ def _initialize_intelligent_cruise_button_management(CP: structs.CarParams, CP_S
     params = Params()
 
   icbm_enabled = params.get_bool("IntelligentCruiseButtonManagement")
-  if icbm_enabled and CP_SP.intelligentCruiseButtonManagementAvailable and not CP.openpilotLongitudinalControl:
+  if icbm_enabled and icbm_applicable(CP, CP_SP):
     CP_SP.pcmCruiseSpeed = False
 
 
@@ -135,16 +135,12 @@ def _cleanup_unsupported_params(CP: structs.CarParams, CP_SP: structs.CarParamsS
     params.remove("EnforceTorqueControl")
     params.remove("LateralJerkTorqueController")
 
-  if not CP_SP.intelligentCruiseButtonManagementAvailable or CP.openpilotLongitudinalControl:
-    cloudlog.warning("ICBM not available or openpilot Longitudinal Control enabled, cleaning up params")
+  if not icbm_applicable(CP, CP_SP):
+    cloudlog.warning("ICBM not applicable, cleaning up params")
     params.remove("IntelligentCruiseButtonManagement")
 
-  if not CP.openpilotLongitudinalControl and CP_SP.pcmCruiseSpeed:
-    cloudlog.warning("openpilot Longitudinal Control and ICBM not available, cleaning up params")
-    params.remove("DynamicExperimentalControl")
-    params.remove("CustomAccIncrementsEnabled")
-    params.remove("SmartCruiseControlVision")
-    params.remove("SmartCruiseControlMap")
+  # DEC, custom ACC and SCC stay as the user left them without openpilot long or ICBM: they
+  # are inert then, and come back as set when either returns
 
   set_speed_limit_assist_availability(CP, CP_SP, params)
 

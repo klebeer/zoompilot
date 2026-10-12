@@ -6,6 +6,8 @@ See the LICENSE.md file in the root directory for more details.
 """
 
 from openpilot.selfdrive.ui.mici.widgets.button import BigParamControl
+from openpilot.selfdrive.ui.sunnypilot.longitudinal_mode import alpha_longitudinal_reachable, longitudinal_mode_labels
+from openpilot.selfdrive.ui.sunnypilot.mici.layouts.alpha_longitudinal import AlphaLongitudinalLayoutMici
 from openpilot.selfdrive.ui.sunnypilot.mici.widgets.button import (
   BigButtonSP,
   BigMultiParamToggleSP,
@@ -16,7 +18,7 @@ from openpilot.system.ui.lib.multilang import tr
 from openpilot.system.ui.widgets.scroller import NavScroller
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.application import gui_app
-from openpilot.sunnypilot.selfdrive.car.intelligent_cruise_button_management.controller import DECEL_OVERSHOOT_PARAMS
+from openpilot.sunnypilot.selfdrive.car.intelligent_cruise_button_management.helpers import icbm_applicable, icbm_moves_speed_limits
 
 SL_MODE_LABELS = [tr("off"), tr("info"), tr("warn"), tr("assist")]
 SL_SOURCE_LABELS = [tr("car"), tr("map"), tr("car-first"), tr("map-first"), tr("combined")]
@@ -41,7 +43,7 @@ def _offset_label(value):
 
 
 class CruiseLayoutMici(NavScroller):
-  """Cruise settings: ICBM, DEC, SCC, custom ACC increments, speed limit assist.
+  """Cruise settings: alpha longitudinal, ICBM, SCC, custom ACC increments, speed limit assist.
 
   State gating pattern:
     - _update_state runs every frame, reads params and enables/disables widgets
@@ -54,24 +56,24 @@ class CruiseLayoutMici(NavScroller):
     super().__init__()
 
     self._prev_icbm_available: bool | None = None
-    self._prev_has_long_or_icbm: bool | None = None
     self._prev_sla_available: bool | None = None
-    self._prev_overshoot_available: bool | None = None
 
+    self._alpha_long_btn = BigButtonSP(tr("alpha longitudinal"))
+    alpha_long_view = AlphaLongitudinalLayoutMici()
+    self._alpha_long_btn.set_click_callback(lambda: gui_app.push_widget(alpha_long_view))
     self._icbm_toggle = BigParamControl(tr("intelligent cruise button management"), "IntelligentCruiseButtonManagement")
-    self._dec_toggle = BigParamControl(tr("dynamic experimental control"), "DynamicExperimentalControl")
-    self._scc_v_toggle = BigParamControl(tr("smart cruise vision"), "SmartCruiseControlVision")
-    self._scc_m_toggle = BigParamControl(tr("smart cruise map"), "SmartCruiseControlMap")
-    self._scc_do_toggle = BigParamControl(tr("decel overshoot"), "SmartCruiseDecelOvershoot")
+    self._scc_v_toggle = BigParamControl(tr("slow for curves: vision"), "SmartCruiseControlVision")
+    self._scc_m_toggle = BigParamControl(tr("slow for curves: map"), "SmartCruiseControlMap")
     self._custom_acc_btn = BigButtonSP(tr("custom increments"))
     self._speed_limit_btn = BigButtonSP(tr("speed limit"))
 
-    for btn in [self._custom_acc_btn, self._speed_limit_btn]:
+    for btn in [self._alpha_long_btn, self._custom_acc_btn, self._speed_limit_btn]:
       btn.set_subtitle_font_size(24)
 
     self._scroller.add_widgets([
-      self._icbm_toggle, self._dec_toggle,
-      self._scc_v_toggle, self._scc_m_toggle, self._scc_do_toggle,
+      self._alpha_long_btn,
+      self._icbm_toggle,
+      self._scc_v_toggle, self._scc_m_toggle,
       self._custom_acc_btn, self._speed_limit_btn,
     ])
 
@@ -97,43 +99,29 @@ class CruiseLayoutMici(NavScroller):
     super()._update_state()
 
     self._icbm_toggle.refresh()
-    self._dec_toggle.refresh()
     self._scc_v_toggle.refresh()
     self._scc_m_toggle.refresh()
-    self._scc_do_toggle.refresh()
 
     cp_ready = ui_state.CP is not None and ui_state.CP_SP is not None
     has_long = cp_ready and ui_state.has_longitudinal_control
     offroad = ui_state.is_offroad()
-    icbm_available = cp_ready and ui_state.CP_SP.intelligentCruiseButtonManagementAvailable and not has_long
+    icbm_available = cp_ready and icbm_applicable(ui_state.CP, ui_state.CP_SP)
     # Read live toggle state to avoid the five-second params refresh delay.
     has_icbm = icbm_available and self._icbm_toggle._checked
-    # decel overshoot drives the stock ACC through ICBM; needs a measured per-brand plant map
-    overshoot_available = has_icbm and cp_ready and ui_state.CP.brand in DECEL_OVERSHOOT_PARAMS
 
     self._icbm_toggle.set_enabled(icbm_available and offroad)
-    self._dec_toggle.set_enabled(has_long)
-    self._scc_v_toggle.set_enabled(has_long or has_icbm)
-    self._scc_m_toggle.set_enabled(has_long or has_icbm)
-    self._scc_do_toggle.set_enabled(overshoot_available)
-    self._custom_acc_btn.set_enabled(((has_long and not ui_state.CP.pcmCruise) or has_icbm) and offroad if cp_ready else False)
+    self._alpha_long_btn.set_enabled(alpha_longitudinal_reachable(ui_state))
+    for toggle in (self._scc_v_toggle, self._scc_m_toggle):
+      toggle.set_superseded(not (has_long or has_icbm))
+    # has_long and has_icbm are False until CP is ready, so CP is not read before then
+    custom_acc_available = (has_long and not ui_state.CP.pcmCruise) or has_icbm
+    self._custom_acc_toggle.set_superseded(not custom_acc_available)
+    self._custom_acc_btn.set_enabled(custom_acc_available and offroad)
 
     # Remove dependent params only on a true-to-false transition.
     if not icbm_available and self._prev_icbm_available is not False:
       ui_state.params.remove("IntelligentCruiseButtonManagement")
     self._prev_icbm_available = icbm_available
-
-    if not overshoot_available and self._prev_overshoot_available is not False:
-      ui_state.params.remove("SmartCruiseDecelOvershoot")
-    self._prev_overshoot_available = overshoot_available
-
-    has_long_or_icbm = has_long or has_icbm
-    if not has_long_or_icbm and self._prev_has_long_or_icbm is not False:
-      ui_state.params.remove("CustomAccIncrementsEnabled")
-      ui_state.params.remove("DynamicExperimentalControl")
-      ui_state.params.remove("SmartCruiseControlVision")
-      ui_state.params.remove("SmartCruiseControlMap")
-    self._prev_has_long_or_icbm = has_long_or_icbm
 
     # Custom ACC button subtitle
     acc_on = ui_state.params.get_bool("CustomAccIncrementsEnabled")
@@ -146,6 +134,12 @@ class CruiseLayoutMici(NavScroller):
       long_val = ACC_LONG_PRESS_MAP.get(long_raw, long_raw)
       self._custom_acc_btn.set_badges([(f"{short_val}{unit}", "on"), (f"{long_val}{unit}", "on")])
 
+    # Alpha longitudinal button subtitle: the mode that drives
+    if labels := longitudinal_mode_labels(ui_state):
+      self._alpha_long_btn.set_badges([(label, "on") for label in labels])
+    else:
+      self._alpha_long_btn.set_disabled()
+
     # Speed limit button subtitle
     sl_mode_idx = ui_state.params.get("SpeedLimitMode", return_default=True) or 0
     sl_mode = SL_MODE_LABELS[min(sl_mode_idx, len(SL_MODE_LABELS) - 1)]
@@ -157,7 +151,8 @@ class CruiseLayoutMici(NavScroller):
       sl_source = SL_SOURCE_LABELS[min(sl_source_idx, len(SL_SOURCE_LABELS) - 1)]
       sl_offset_val = ui_state.params.get("SpeedLimitValueOffset", return_default=True) or 0
       unit = "%" if offset_type == 2 else (speed_unit() if offset_type == 1 else "")
-      badges = [(sl_mode, "on"), (sl_source, "on")]
+      icbm = icbm_moves_speed_limits(has_long, has_icbm, sl_mode_idx)
+      badges = [(sl_mode, "on"), (tr("icbm"), "on" if icbm else "off"), (sl_source, "on")]
       if unit:
         sign = "+" if sl_offset_val > 0 else ""
         badges.append((f"{sign}{sl_offset_val}{unit}", "on"))
@@ -172,7 +167,7 @@ class CruiseLayoutMici(NavScroller):
     self._custom_acc_toggle.refresh()
     self._acc_short.refresh()
     self._acc_long.refresh()
-    self._custom_acc_toggle.set_enabled(self._custom_acc_btn.enabled)
+    self._custom_acc_toggle.set_enabled(ui_state.is_offroad)
     # Lambda: short/long respond same-frame when toggle is tapped (see button.py docstring)
     self._acc_short.set_enabled(lambda: self._custom_acc_btn.enabled and self._custom_acc_toggle._checked)
     self._acc_long.set_enabled(lambda: self._custom_acc_btn.enabled and self._custom_acc_toggle._checked)
@@ -199,7 +194,9 @@ class CruiseLayoutMici(NavScroller):
     self._sl_source.refresh()
     self._sl_offset_type.refresh()
     self._sl_mode.set_enabled(True)
-    self._sl_source.set_enabled(True)
-    self._sl_offset_type.set_enabled(True)
-    self._sl_offset_value.set_enabled(offset_type != 0)  # 0 = off/none
+    # nothing reads these with the mode off
+    sl_on = self._sl_mode.value != SL_MODE_LABELS[SL_MODE_OFF]
+    self._sl_source.set_superseded(not sl_on)
+    self._sl_offset_type.set_superseded(not sl_on)
+    self._sl_offset_value.set_enabled(sl_on and offset_type != 0)  # 0 = off/none
     self._sl_offset_value.refresh()

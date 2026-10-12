@@ -11,7 +11,9 @@ import numpy as np
 import pytest
 
 from unittest.mock import MagicMock, patch
-from openpilot.selfdrive.locationd.torqued import TorqueEstimator, TorqueBuckets, VERSION, MIN_FILTER_DECAY
+from opendbc.car.mazda.values import MazdaFlags
+from openpilot.selfdrive.locationd.torqued import TorqueEstimator, TorqueBuckets, VERSION, MIN_FILTER_DECAY, POINTS_PER_BUCKET, \
+  STEER_BUCKET_BOUNDS
 from openpilot.sunnypilot.selfdrive.locationd.torqued_ext import (
   DEFAULT_SPEED_BIN_BOUNDS as SPEED_BIN_BOUNDS, DEFAULT_SPEED_BIN_CENTERS as SPEED_BIN_CENTERS,
   TorqueEstimatorExt,
@@ -78,7 +80,7 @@ class TestCentersToBounds:
 
 @needs_speed_dep_car
 class TestSpeedBinnedLearning:
-  """Toggle ON on a configured car."""
+  """Self-tune on, on a configured car."""
 
   def test_speed_bins_initialized(self, fake_params):
     for fingerprint in SPEED_DEP_CARS:
@@ -141,17 +143,33 @@ class TestSpeedBinnedLearning:
     assert len(est.filtered_points) == 0
 
 
-class TestToggleGate:
-  """Toggle OFF disables speed-binning even for configured cars."""
+class TestSelfTuneGate:
+  """Speed-dep runs wherever self-tune does, with no toggle of its own."""
 
-  def test_toggle_off_no_speed_bins(self, fake_params_off):
-    if SPEED_DEP_FINGERPRINT:
-      est = TorqueEstimator(make_cp(fingerprint=SPEED_DEP_FINGERPRINT))
-      assert not est.speed_binned
+  @staticmethod
+  def _cp(brand):
+    return make_cp(fingerprint=NON_SPEED_DEP_FINGERPRINT, brand=brand)
+
+  @pytest.mark.parametrize("brand, self_tunes_bare", [('toyota', True), ('mazda', False)])
+  def test_follows_self_tune(self, fake_params_off, brand, self_tunes_bare):
+    # bare: upstream's brand gate; under Enforce Torque Control: the Self-Tune toggle
+    assert TorqueEstimator(self._cp(brand)).speed_binned == self_tunes_bare
+    fake_params_off.bools.add("EnforceTorqueControl")
+    assert not TorqueEstimator(self._cp(brand)).speed_binned
+    fake_params_off.bools.add("LiveTorqueParamsToggle")
+    assert TorqueEstimator(self._cp(brand)).speed_binned
+
+  def test_manual_override_keeps_bins(self, fake_params):
+    # the override pauses the learner's output, not the learner
+    fake_params.bools.update({"CustomTorqueParams", "TorqueParamsOverrideEnabled"})
+    fake_params.store.update({"TorqueParamsOverrideLatAccelFactor": 2.0, "TorqueParamsOverrideFriction": 0.1})
+    est = TorqueEstimator(make_cp(fingerprint=NON_SPEED_DEP_FINGERPRINT))
+    assert est.speed_binned
+    assert not est.use_params
 
 
 class TestBackwardCompatibility:
-  """Cars with the toggle OFF are unaffected."""
+  """Cars without self-tune are unaffected."""
 
   def test_unconfigured_car_no_speed_bins(self, fake_params_off):
     est = TorqueEstimator(make_cp(fingerprint=NON_SPEED_DEP_FINGERPRINT))
@@ -190,8 +208,8 @@ class TestBackwardCompatibility:
       assert msg.lateralTorqueParameters.calPerc == 0
 
 
-class TestUnconfiguredCarToggleOn:
-  """An unconfigured car with speed-dep ON gets the default bins and the offline seeds."""
+class TestUnconfiguredCarSelfTuneOn:
+  """An unconfigured car with self-tune on gets the default bins and the offline seeds."""
 
   def test_default_bins_created(self, fake_params):
     est = TorqueEstimator(make_cp(fingerprint=NON_SPEED_DEP_FINGERPRINT))
@@ -242,7 +260,6 @@ class TestNaNHandling:
     bucket.is_valid.return_value = valid
     bucket.get_points.return_value = np.zeros((10, 3))
     est.speed_bin_points[target_bin] = bucket
-    est._speed_bin_last_len[target_bin] = -1  # force recalculation
     return bucket
 
   def test_svd_failure_returns_false(self, fake_params):
@@ -269,3 +286,66 @@ class TestNaNHandling:
     with patch('numpy.linalg.svd', side_effect=np.linalg.LinAlgError):
       est._estimate_params_speed_binned()
     assert est.speed_bin_points[1] is bucket
+
+
+@needs_speed_dep_car
+class TestFullBinKeepsLearning:
+  """A bin's buckets are ring buffers: once all eight hold POINTS_PER_BUCKET its length stops
+  changing while new points keep replacing old ones. The fit must still rerun on them; keyed on
+  the length, a full bin froze at whatever it had learned when it filled."""
+
+  def test_a_full_bin_refits_on_new_points(self, fake_params):
+    est = TorqueEstimator(make_cp())
+    i = 1
+    lo, hi = est.speed_bin_bounds[i]
+    rng = np.random.default_rng(0)
+    bucket = est.speed_bin_points[i]
+    for blo, bhi in STEER_BUCKET_BOUNDS:
+      steer = rng.uniform(blo, bhi, POINTS_PER_BUCKET)
+      bucket.load_points(np.c_[steer, 2.2 * steer + rng.normal(0.0, 0.05, len(steer))].tolist())
+    full = len(STEER_BUCKET_BOUNDS) * POINTS_PER_BUCKET
+    assert len(bucket) == full
+    est._estimate_params_speed_binned()
+    before = est.speed_bin_filtered[i]['latAccelFactor'].x
+    for steer in rng.uniform(-0.45, 0.45, 50):
+      est._on_torque_point(float(steer), 3.0 * float(steer), (lo + hi) / 2)
+    assert len(bucket) == full
+    est._estimate_params_speed_binned()
+    assert est.speed_bin_filtered[i]['latAccelFactor'].x != before
+
+  def test_no_refit_without_new_points(self, fake_params):
+    est = TorqueEstimator(make_cp())
+    bucket = est.speed_bin_points[0]
+    bucket.load_points([[s, 2.0 * s] for s in np.linspace(-0.45, 0.45, 400)])
+    est._estimate_params_speed_binned()
+    before = est.speed_bin_filtered[0]['latAccelFactor'].x
+    est._estimate_params_speed_binned()
+    assert est.speed_bin_filtered[0]['latAccelFactor'].x == before
+
+
+class TestLegacyFirmwareBins:
+  def test_first_kept_bin_starts_at_its_own_edge(self, fake_params):
+    # a legacy-firmware CX-5 2022 keeps the bins above its 45 kph floor; the first of them must
+    # not reach down over the floor and the firmware's dead band to the default 5 m/s
+    CP = make_cp('MAZDA_CX5_2022')
+    CP.minSteerSpeed = 45 / 3.6
+    est = TorqueEstimator(CP)
+    full = SPEED_DEP_CARS['MAZDA_CX5_2022']['speed_bp']
+    first = full.index(est.speed_bin_centers[0])
+    assert est.speed_bin_bounds[0][0] == pytest.approx((full[first - 1] + full[first]) / 2)
+    assert est.speed_bin_bounds[0][0] > CP.minSteerSpeed
+
+
+class TestCustomTorqueParamsScale:
+  """The custom offline values share the manual override's params, typed on upstream's scale."""
+
+  @pytest.mark.parametrize("brand, laf, friction", [('mazda', 1.8, 0.1), ('toyota', 1.2, 0.15)])
+  def test_offline_values_on_steer_max(self, fake_params, brand, laf, friction):
+    fake_params.store.update(TorqueParamsOverrideLatAccelFactor='1.2', TorqueParamsOverrideFriction='0.15')
+    fake_params.bools.add('CustomTorqueParams')
+    CP = make_cp('MAZDA_CX5_2022', brand=brand)
+    if brand == 'mazda':
+      CP.flags = int(MazdaFlags.GEN1 | MazdaFlags.STEER_TO_ZERO_EPS)
+    est = TorqueEstimator(CP)
+    assert est.offline_latAccelFactor == pytest.approx(laf)
+    assert est.offline_friction == pytest.approx(friction)

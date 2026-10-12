@@ -28,6 +28,68 @@ def speed_unit():
   return "km/h" if ui_state.is_metric else "mph"
 
 
+BADGE_FONT_SIZE, BADGE_H_PAD, BADGE_GAP = 28, 10, 8
+
+
+def badge_rows(labels: list[str], max_width: float) -> list[list[tuple[str, float, float]]]:
+  """Wrap labels into rows of (label, pill width, text width) no wider than max_width."""
+  font = gui_app.font(FontWeight.BOLD)
+  rows: list[list] = []
+  current_row: list = []
+  row_width = 0.0
+  for label in labels:
+    text_w = measure_text_cached(font, label, BADGE_FONT_SIZE).x
+    spec = (label, text_w + BADGE_H_PAD * 2, text_w)
+    needed = spec[1] + (BADGE_GAP if current_row else 0)
+    if current_row and row_width + needed > max_width:
+      rows.append(current_row)
+      current_row, row_width = [spec], spec[1]
+    else:
+      current_row.append(spec)
+      row_width += needed
+  if current_row:
+    rows.append(current_row)
+  return rows
+
+
+def draw_badge_pills(rect: rl.Rectangle, labels: list[str], grey: bool, dim: bool):
+  """Render labels as outlined pill chips in a bottom-anchored flow layout."""
+  font = gui_app.font(FontWeight.BOLD)
+  font_size, gap = BADGE_FONT_SIZE, BADGE_GAP
+  alpha_mult = 0.3 if dim else 1.0
+  border_base, text_base = BADGE_GREY if grey else BADGE_GREEN
+  border = rl.Color(border_base.r, border_base.g, border_base.b, int(border_base.a * alpha_mult))
+  text_color = rl.Color(text_base.r, text_base.g, text_base.b, int(text_base.a * alpha_mult))
+
+  rows = badge_rows(labels, rect.width)
+
+  text_h = measure_text_cached(font, "Xg", font_size).y
+  max_h = (rect.height - gap * (len(rows) - 1)) / len(rows) if len(rows) > 1 else rect.height
+  badge_h = max(text_h, min(text_h + 10, max_h))
+
+  cy = rect.y + rect.height - badge_h
+  for row in reversed(rows):
+    total_badge_w = sum(bw for _, bw, _ in row)
+    row_gap = gap if len(row) <= 1 else (rect.width - total_badge_w) / (len(row) - 1)
+    cx = rect.x
+    for label, badge_w, text_w in row:
+      pill_rect = rl.Rectangle(cx, cy, badge_w, badge_h)
+      rl.draw_rectangle_rounded_lines_ex(pill_rect, 0.5, 6, 2, border)
+      ty = cy + (badge_h - text_h) / 2 - 2
+      rl.draw_text_ex(font, label, rl.Vector2(cx + (badge_w - text_w) / 2, ty), font_size, 0, text_color)
+      cx += badge_w + row_gap
+    cy -= badge_h + gap
+
+
+def badge_area(button: BigButton, btn_y: float) -> rl.Rectangle:
+  """The subtitle area under a top-aligned title, where badges replace the upstream subtitle."""
+  label_x = button._rect.x + button.LABEL_HORIZONTAL_PADDING
+  label_y = btn_y + button.LABEL_VERTICAL_PADDING + button._label.get_content_height(button._title_width_hint())
+  sub_label_height = btn_y + button._rect.height - button.LABEL_VERTICAL_PADDING - label_y
+  badge_margin = 8
+  return rl.Rectangle(label_x, label_y + badge_margin, button._subtitle_width_hint(), sub_label_height - badge_margin)
+
+
 class BigButtonSP(BigButton):
   """BigButton with badges, disabled state, active tinting, and sub-panel linking."""
 
@@ -75,61 +137,14 @@ class BigButtonSP(BigButton):
     self._label.set_alignment_vertical(align)
 
   def _draw_badges(self, rect: rl.Rectangle):
-    """Render badge labels as outlined pill chips in a flow layout."""
-    font = gui_app.font(FontWeight.BOLD)
-    font_size, h_pad, gap = 28, 10, 8
-    alpha_mult = 1.0 if self.enabled else 0.3
-    border_base, text_base = BADGE_GREY if self._disabled else BADGE_GREEN
-    border = rl.Color(border_base.r, border_base.g, border_base.b, int(border_base.a * alpha_mult))
-    text_color = rl.Color(text_base.r, text_base.g, text_base.b, int(text_base.a * alpha_mult))
-
-    specs = []
     assert self._badge_labels is not None
-    for label in self._badge_labels:
-      text_w = measure_text_cached(font, label, font_size).x
-      specs.append((label, text_w + h_pad * 2, text_w))
-
-    rows: list[list] = []
-    current_row: list = []
-    row_width = 0.0
-    for spec in specs:
-      needed = spec[1] + (gap if current_row else 0)
-      if current_row and row_width + needed > rect.width:
-        rows.append(current_row)
-        current_row, row_width = [spec], spec[1]
-      else:
-        current_row.append(spec)
-        row_width += needed
-    if current_row:
-      rows.append(current_row)
-
-    text_h = measure_text_cached(font, "Xg", font_size).y
-    max_h = (rect.height - gap * (len(rows) - 1)) / len(rows) if len(rows) > 1 else rect.height
-    badge_h = max(text_h, min(text_h + 10, max_h))
-
-    cy = rect.y + rect.height - badge_h
-    for row in reversed(rows):
-      total_badge_w = sum(bw for _, bw, _ in row)
-      row_gap = gap if len(row) <= 1 else (rect.width - total_badge_w) / (len(row) - 1)
-      cx = rect.x
-      for label, badge_w, text_w in row:
-        pill_rect = rl.Rectangle(cx, cy, badge_w, badge_h)
-        rl.draw_rectangle_rounded_lines_ex(pill_rect, 0.5, 6, 2, border)
-        ty = cy + (badge_h - text_h) / 2 - 2
-        rl.draw_text_ex(font, label, rl.Vector2(cx + (badge_w - text_w) / 2, ty), font_size, 0, text_color)
-        cx += badge_w + row_gap
-      cy -= badge_h + gap
+    draw_badge_pills(rect, self._badge_labels, grey=self._disabled, dim=not self.enabled)
 
   def _draw_content(self, btn_y: float):
     # Draw badges in the subtitle area cleared by set_badges.
     super()._draw_content(btn_y)
     if self._badge_labels:
-      label_x = self._rect.x + self.LABEL_HORIZONTAL_PADDING
-      label_y = btn_y + self.LABEL_VERTICAL_PADDING + self._label.get_content_height(self._title_width_hint())
-      sub_label_height = btn_y + self._rect.height - self.LABEL_VERTICAL_PADDING - label_y
-      badge_margin = 8
-      self._draw_badges(rl.Rectangle(label_x, label_y + badge_margin, self._subtitle_width_hint(),
-                                     sub_label_height - badge_margin))
+      self._draw_badges(badge_area(self, btn_y))
 
   def link_sub_panel(self, items) -> "SubPanelSP":
     """Create a self-refreshing sub-panel with the given items, linked to this button's click."""
@@ -169,22 +184,17 @@ class SubPanelSP(NavScroller):
 
 
 class BigParamControlSP(BigParamControl):
-  """Disable input and display state while a control dependency is unmet.
+  """Lock the control while a control dependency is unmet.
 
-  The stored value remains unchanged and becomes visible again when the dependency is met.
-  The callable dependency lets parent-toggle changes take effect in the same frame.
+  The stored value stays on screen, an on pill drawn grey, and applies again once the dependency is met.
+  The callable dependency lets parent-toggle changes take effect in the same frame. Other locks, like
+  onroad, go through set_enabled and keep the pill green.
   """
 
   def __init__(self, text: str, param: str, depends_on: Callable[[], bool] | None = None, **kwargs):
     super().__init__(text, param, **kwargs)
-    self._depends_on = depends_on
     if depends_on is not None:
-      self.set_enabled(depends_on)
-
-  def refresh(self):
-    super().refresh()
-    if self._depends_on is not None and not self._depends_on():
-      self.set_checked(False)
+      self.set_superseded(lambda: not depends_on())
 
 
 class BigMultiParamToggleSP(BigMultiParamToggle):
