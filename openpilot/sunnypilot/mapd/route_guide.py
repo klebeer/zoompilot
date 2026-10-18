@@ -22,8 +22,10 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.sunnypilot.mapd import route_desire_live
 from openpilot.sunnypilot.mapd.curve_warning import LOOKAHEAD_M, distance_m
 from openpilot.sunnypilot.mapd.nav_messages import NavPublisher
+from openpilot.sunnypilot.mapd.reroute import Rerouter
 from openpilot.sunnypilot.mapd.route_choice import BUNDLE_PATH, CHOICE_PATH, load_bundle, read_json, write_json
 from openpilot.sunnypilot.mapd.route_follower import Follower, agreed, chosen_turn, side, stamp
+from openpilot.sunnypilot.mapd.route_planner import Planner
 
 LOG_DIR = os.path.expanduser("~/.comma/nav_shadow") if PC else "/data/media/0/nav_shadow"
 ROUTE_TURN_DEG = 45.0        # a maneuver on the route counts as a turn from this heading change
@@ -98,7 +100,7 @@ class ChoiceWatch:
 class Guide:
   """The follower for the current bundle, the driver's choice and, when live, the published turn."""
 
-  def __init__(self, live: bool, bundle_path: str = BUNDLE_PATH, choice_path: str = CHOICE_PATH):
+  def __init__(self, live: bool, bundle_path: str = BUNDLE_PATH, choice_path: str = CHOICE_PATH, rerouter: Rerouter | None = None):
     self.bundle_path, self.bundle_mtime, self.bundle_checked = bundle_path, None, -1e9
     self.follower: Follower | None = None
     self.choices = ChoiceWatch(choice_path)
@@ -107,6 +109,7 @@ class Guide:
     self.state: tuple | None = None
     self.latch = route_desire_live.Latch() if live else None
     self.publisher = route_desire_live.Publisher() if live else None
+    self.rerouter = rerouter
 
   def _reload(self, now: float) -> dict | None:
     """A record when the bundle file changed, after building a follower for it. Looks at it at most every FILE_CHECK_S."""
@@ -143,6 +146,9 @@ class Guide:
                       "progress_m": self.nav["progress_m"], "lat": lat, "lon": lon})
         if self.nav["chosen"] and self.nav["chosen"]["arrived"]:
           out.append(self.choices.arrived(self.follower))
+    if self.rerouter is not None:
+      out.append(self.rerouter.step(now, self.nav, self.follower, self.choices.choice, (lat, lon), heading, v_kph,
+                                    self.bundle_path, self.choices.path, self.bundle_mtime))
     if self.latch is not None:
       wanted = blinker if route_desire(self.nav, v_kph, blinker) is not None else None
       was = self.publisher.side
@@ -157,7 +163,8 @@ class Guide:
 def main() -> None:
   sm = messaging.SubMaster(["carState", "carControl", "liveLocationKalman"])
   params = Params()
-  guide = Guide(route_desire_live.enabled())
+  planner = Planner()
+  guide = Guide(route_desire_live.enabled(), rerouter=Rerouter(planner) if planner.available() else None)
   nav_pub, nav_checked = None, -1e9
   name = time.strftime("%Y-%m-%d--%H-%M-%S") + f"--{time.monotonic_ns()}.jsonl"
   out = None
