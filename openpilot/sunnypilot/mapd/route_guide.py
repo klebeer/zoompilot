@@ -17,9 +17,11 @@ from datetime import UTC, datetime
 
 import openpilot.cereal.messaging as messaging
 from openpilot.common.hardware import PC
+from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
 from openpilot.sunnypilot.mapd import route_desire_live
 from openpilot.sunnypilot.mapd.curve_warning import LOOKAHEAD_M, distance_m
+from openpilot.sunnypilot.mapd.nav_messages import NavPublisher
 from openpilot.sunnypilot.mapd.route_choice import BUNDLE_PATH, CHOICE_PATH, load_bundle, read_json, write_json
 from openpilot.sunnypilot.mapd.route_follower import Follower, agreed, chosen_turn, side, stamp
 
@@ -30,6 +32,7 @@ FOLLOW_STEP_M = 2.0          # the follower is fed a fix every this far, not eve
 FILE_CHECK_S = 1.0           # how often the bundle and choice files are looked at
 DESIRE_M = 40.0              # the route asks for its turn only this close to the corner
 DESIRE_KPH = 30.0            # and at this speed or slower
+NAV_CHECK_S = 1.0            # how often NavigationEnabled is read: comma's navd owns the nav messages while it is on
 
 
 def is_route_turn(n: dict) -> bool:
@@ -153,19 +156,30 @@ class Guide:
 
 def main() -> None:
   sm = messaging.SubMaster(["carState", "carControl", "liveLocationKalman"])
+  params = Params()
   guide = Guide(route_desire_live.enabled())
+  nav_pub, nav_checked = None, -1e9
   name = time.strftime("%Y-%m-%d--%H-%M-%S") + f"--{time.monotonic_ns()}.jsonl"
   out = None
   while True:
     try:
       sm.update(100)
+      now = time.monotonic()
+      if now - nav_checked >= NAV_CHECK_S:
+        nav_checked = now
+        if params.get_bool("NavigationEnabled"):
+          nav_pub = None
+        elif nav_pub is None:
+          nav_pub = NavPublisher(messaging.PubMaster(["navRoute", "navInstruction"]), messaging.new_message)
       loc = sm["liveLocationKalman"]
       if not loc.positionGeodetic.valid:
         continue
       left, right = sm["carState"].leftBlinker, sm["carState"].rightBlinker
-      records = guide.step(time.monotonic(), time.monotonic_ns(), loc.positionGeodetic.value[0], loc.positionGeodetic.value[1],
+      records = guide.step(now, time.monotonic_ns(), loc.positionGeodetic.value[0], loc.positionGeodetic.value[1],
                            math.degrees(loc.calibratedOrientationNED.value[2]) % 360, sm["carState"].vEgo * 3.6,
                            None if left == right else "left" if left else "right", sm["carControl"].latActive)
+      if nav_pub is not None:
+        nav_pub.step(now, guide.nav, guide.follower)
       if records:
         if out is None:
           os.makedirs(LOG_DIR, exist_ok=True)
