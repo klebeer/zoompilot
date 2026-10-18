@@ -66,6 +66,12 @@ def only_onroad(started: bool, params: Params, CP: car.CarParams) -> bool:
 def navigation(started: bool, params: Params, CP: car.CarParams) -> bool:
   return started and params.get_bool("NavigationEnabled")
 
+
+def local_map_render(started: bool, params: Params, CP: car.CarParams) -> bool:
+  # comma's mapsd over the on-device basemap and route_guide's route; never beside comma's own, which serves the same stream
+  from openpilot.sunnypilot.mapd import local_map
+  return started and local_map.enabled() and not params.get_bool("NavigationEnabled")
+
 def only_offroad(started: bool, params: Params, CP: car.CarParams) -> bool:
   return not started
 
@@ -186,6 +192,7 @@ procs += [
   PythonProcess("mapd_logger", "openpilot.sunnypilot.mapd.mapd_logger", and_(only_onroad, mapd_ready)),
   PythonProcess("nav_channel", "openpilot.sunnypilot.mapd.nav_channel", always_run),
   PythonProcess("route_guide", "openpilot.sunnypilot.mapd.route_guide", only_onroad),
+  PythonProcess("mapsd_local", "openpilot.sunnypilot.mapd.local_map", local_map_render),
   PythonProcess("log_archiver", "openpilot.sunnypilot.system.log_archiver", only_offroad),
 
   # locationd
