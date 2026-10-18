@@ -13,6 +13,60 @@ according to that. ICBM is a servo that walks the dash onto the plan target
 driver's setpoint when the limiter releases. Measurements below are from the Mazda
 CX-5 2022 unless stated.
 
+## Activation
+
+ICBM has no toggle. It runs on a car with the buttons (`helpers.icbm_applicable`: the opendbc
+`intelligentCruiseButtonManagementAvailable` flag, and a setpoint the ECU keeps) while a
+feature that acts through it is on. The features are one table, `demand.CONSUMERS`, which the
+boot decision, the latch, the migration and the settings locks all read: SCC vision and map
+need ICBM on stock ACC only (under alpha long the planner executes them), SLA assist and custom
+increments in both modes. A new feature is one entry. There is no escape hatch: the features
+are the switches.
+
+card owns the decision (`icbm_latch.IcbmLatch`) and publishes it as
+`carStateSP.zoompilot.icbmActivation`; controlsd, selfdrived, plannerd and the UI read that,
+never `CarParamsSP.pcmCruiseSpeed`, which only records the boot decision. The field is an enum
+with `unset` first, so logs from before it (old routes, process replay refs) fall back to the
+boot flag. Upstream-owned files change by one token on four lines: `cruise.py` x2 and
+`controlsd.py` x2 read `self.pcm_cruise_speed` (a property over the latch in `VCruiseHelperSP`,
+a read of `carStateSP` in `ControlsExt`) instead of `self.CP_SP.pcmCruiseSpeed`.
+
+The decision moves only while neither openpilot nor the stock cruise is engaged and no cruise
+button is down or changing. There the two modes agree on everything (no `longActive`, the
+dash's setpoint, an idle servo, no SLA session), so a feature switched on while driving starts
+at the next engage and one switched off keeps ICBM until the next disengage. The latch reads
+demand on card's 10 Hz params thread and `engaged = CC.enabled or CS.cruiseState.enabled` in
+`VCruiseHelperSP.update_enabled_state`; card runs the button timers in both modes, so none
+carries across a change. On a change card clears the reconciler, recomputes the minimum set
+speed and moves the SLA owner (`pcm_machine_owns_sla(CP, icbm_active)`: the arbiter's
+`set_icbm_active`; plannerd keeps its machine and the mirror, picks per frame and resets on a
+handover), and selfdrived re-initialises the servo, keeping `fast_faulted`.
+
+Panda safety needs nothing: on every ICBM brand the +/- frames pass only while
+`controls_allowed`, with no ICBM flag. opendbc reads `pcmCruiseSpeed` only to default it, and
+`longActive` / `override` only on openpilot-long paths (Mazda, Chrysler, Honda Bosch, Hyundai
+audited). The audit found Chrysler CUSW (Jeep Cherokee 5th gen) claiming ICBM although
+`chrysler_cusw.h` passes only cancel/resume; fixed in opendbc 957a8279c5.
+
+### Settings and migration
+
+The toggle is gone from mici, TICI and sunnylink. The features are offered wherever
+`has_long or icbm_applicable`; `ui_state.has_icbm`, sunnylink's `has_icbm` and the SLA assist
+demotion (`set_speed_limit_assist_availability`) all key on the capability, or assist could never
+bring ICBM up. While engaged with ICBM off the device will not turn on a feature that needs it
+(`ui_state.icbm_start_locked`). sunnylink's validator cannot gate a toggle on its own value, so
+it locks those features both ways while engaged on an ICBM car. On an upstream sync, a
+sunnypilot change to the toggle UI takes ours.
+
+`migration.py` ran once when the toggle went (2026-10), in `setup_interfaces`, marked by
+`IcbmDemandMigrated` (`PERSISTENT | BACKUP`: restoring a pre-migration backup runs it again).
+On a capable car whose toggle was off it turned off the features that toggle had left inert,
+so no install started pressing buttons: SCC vision, SCC map and custom increments on stock ACC
+(SLA assist to warning), custom increments only under alpha long, where SLA assist stays on
+and now moves the dash to the limit by itself. It removes `IntelligentCruiseButtonManagement`;
+the key stays in `params_keys.h` (upstream owns it). Replay against danger-unstable
+(2026-10-08, four CX-5 drives, ICBM on and off) was identical; on-car pending.
+
 ## The servo
 
 States: `inactive`, `preActive` (react timer running), `holding`, `increasing`,
@@ -51,15 +105,15 @@ release moved the command every few frames and pinned the timer at zero until th
 finished (route 126: 4.1 s of extra post-curve braking). It is held at zero through a
 confirm prompt so a decline or timeout still waits a full window.
 
-With a valid vision lookahead (`smartCruiseControl.vision.vAheadMin > 0`) the profile
+With a valid vision lookahead (`longitudinalPlanSP.zoompilot.sccVAheadMin > 0`) the profile
 replaces the stillness heuristic outright: restore immediately when nothing ahead binds
 below the target, walk up no further than a dip that is coming however quiet the target
 is, and abort a restore in progress when a dip appears below the dash. Route 126: 3 of 8
 over-ceiling apexes were restore-fed, the car accelerating between bends into the next
-apex. The dip is a ceiling, not a stop: `vAheadMin` is the braking-feasible profile
+apex. The dip is a ceiling, not a stop: `sccVAheadMin` is the braking-feasible profile
 minimum, so walking up to it cannot feed an apex, while freezing below it held route 128
 at 20 mph for 6.8 s behind a 41 mph dip and the car braked on to 19.7. Only zoompilot's
-vision planner publishes `vAheadMin` (`scc-curve-planning.md`, which planner runs); on every
+vision planner publishes `sccVAheadMin` (`scc-curve-planning.md`, which planner runs); on every
 other brand it is 0 and the stillness heuristic stays in charge.
 
 A genuine driver SET- parks up moves for the grace window (a refused re-anchor would
@@ -71,9 +125,8 @@ servo's own sends.
 ## Actuation profile
 
 `ICBMActuationProfile` carries what the servo needs to know about a body ECU.
-`DEFAULT_PROFILE` is discrete taps only, no grid, no hold, no stable-setpoint
-requirement: the long-standing ICBM behaviour. A brand changes behaviour only by adding
-a measured entry.
+`DEFAULT_PROFILE` is discrete taps only, no hold, no stable-setpoint requirement: the
+long-standing ICBM behaviour. A brand changes behaviour only by adding a measured entry.
 
 Mazda CX-5 2022, from a 52-episode driver long-press corpus and an injected-press
 efficiency analysis over 674 rlog segments:
@@ -87,11 +140,10 @@ efficiency analysis over 674 rlog segments:
 
 ### The hold fold on other brands
 
-The servo's sustained sends (`increaseHold` / `decreaseHold`) are a stream of presses,
-valid wherever taps are. A brand whose button interface has no native hold cadence
-(everything but Mazda so far) folds them onto the discrete tap of the same direction
-(`tap_equivalent`) instead of rejecting an unknown state, so enabling ICBM on a new
-brand needs no servo change.
+The servo's sustained sends (`sendButton` increase / decrease with `CarControlZP.icbmHold`)
+are a stream of presses, valid wherever taps are. A brand whose button interface has no
+native hold cadence (everything but Mazda so far) reads only `sendButton` and sends the
+discrete tap of that direction, so enabling ICBM on a new brand needs no servo change.
 
 ## Fast mode
 
@@ -140,8 +192,8 @@ slowly while the limiter is live (aTarget flaps between the ECU's coast, downshi
 brake stages) and at the build rate once the plan is back on cruise, where a residual
 only holds the dash down and stalls the restore.
 
-Decel overshoot has no user toggle. It runs on every brand with an entry in
-`DECEL_OVERSHOOT_PARAMS` (a measured plant; Mazda today) and on no other, since the only
+Decel overshoot has no user toggle. It runs on every brand whose actuation profile has a
+`decel_overshoot` table (a measured plant; Mazda today) and on no other, since the only
 alternative is walking the dash to the whole dip, which brakes as hard as the dip is deep.
 The former `SmartCruiseDecelOvershoot` param and its one-time Mazda seed are gone; a stale
 key on an updated device is ignored.
@@ -201,12 +253,12 @@ and 0.75 at 45 mph, kept at 10 although the refit puts it at 8.9 (interval 8.4-9
 45 mph a budget request brakes nearer -0.82 than -0.75. The 0.90 and 1.05 columns are
 unconstrained (their intervals run to 29 mph) and stay on the previous fit's extrapolation.
 
-Planners budget 0.75 m/s^2 (`limits._STOCK_A_BUDGET`, 10 / 7.75 mph of gap), so an on-time
-manoeuvre never asks for more. The columns past it are the ECU's remaining range, reached
+Planners budget 0.75 m/s^2 (the profile's `stock_a_budget`, 10 / 7.75 mph of gap), so an
+on-time manoeuvre never asks for more. The columns past it are the ECU's remaining range, reached
 only when the vision planner's measured near field says the car is late, and less of it
 from a 50 mph set speed, none from 60 (`scc-curve-planning.md`, what the planner asks for).
 The planners size the stock actuation lead from the same gap:
-`limits._SERVO_TRACK_GAP['mazda'] = 8 mph` is all of a dip the servo walks before the ECU
+the Mazda profile's `track_gap = 8` mph is all of a dip the servo walks before the ECU
 brakes at budget, and the rest is tracked down rather than waited out.
 
 ## Restore quiet window
@@ -256,7 +308,6 @@ checked-out stack, so a baseline is the same command with `PYTHONPATH=<worktree>
 | `DECEL_OVERSHOOT_RISE` | 10 mph/s | full gap in ~0.5 s, inside `REACT_TIMER` | n/a |
 | `DECEL_OVERSHOOT_RELEASE` | 3 mph/s | no pumping between ECU decel stages | route 126 |
 | `tap_rate_hz` (mazda) | 5 Hz | 0.93 steps/press at 5 Hz vs 0.47 at ~9 Hz | 674 segments |
-| `longpress_step` / first / period (mazda) | 5 mph / 0.6 s / 0.55 s | physical hold grid | 52 episodes |
 | servo walk rate (mazda) | 4 mph/s | 294/294 steps at 1 mph; 4.1 hold, 3.8 taps | route 126 |
 
 ## Tried and rejected
@@ -287,6 +338,9 @@ checked-out stack, so a baseline is the same command with `PYTHONPATH=<worktree>
 - Restoring on target stillness when a vision lookahead is available. Restored between
   bends and fed the next apex (route 126, 3 of 8 over-ceiling apexes).
 - An immediate walk-back after a genuine driver press. Reads as a fight (route 126 t=341).
+- Switching ICBM by mutating each process's `CP_SP.pcmCruiseSpeed` at runtime. `carParamsSP`
+  (logged, persisted) stops being constant and the init-time caches still need edits.
+- A separate "cruise buttons" setting for SLA assist: on stock ACC it has one valid value.
 
 ## Under openpilot longitudinal (Mazda alpha long)
 

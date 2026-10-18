@@ -4,6 +4,5 @@
 
 	locksverify = false
 	# Only a chestnut uses the big driving model. Keep its pointer but exclude the object from
-	# install fetches, reducing the LFS payload from about 1974 MB to 174 MB; a chestnut build
-	# fetches it (openpilot/sunnypilot/models/big_model_source.py).
-	fetchexclude = openpilot/selfdrive/modeld/models/big_driving_supercombo.onnx
+	# install fetches; a chestnut build fetches it (openpilot/sunnypilot/models/big_model_source.py).
+	fetchexclude = openpilot/selfdrive/modeld/models/big_driving_tinygrad.pkl

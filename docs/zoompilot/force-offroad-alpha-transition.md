@@ -3,8 +3,9 @@
 Implementation record, 2026-09-10, for the developer workflow while moving: disengage assistance
 and stock cruise, enter Force Offroad, flip Alpha Longitudinal, exit Force Offroad, engage
 normally, with no stop and no ignition cycle. Companion to `mazda-longitudinal.md` (the radar
-protocol) and the handoff plan `force-offroad-alpha-transition-plan.md`. Route ids are the
-device's `00000xxx--<id>` names; times are seconds from the route's first logged message.
+protocol); the handoff plan is zoompilot-research notes/force-offroad-alpha-transition-plan.md.
+Route ids are the device's `00000xxx--<id>` names; times are seconds from the route's first
+logged message.
 
 Status in one line: every part of the workflow is implemented and unit-tested, the moving
 hand-back (Force Offroad entry at speed) is on record as working, and the moving takeover
@@ -65,6 +66,10 @@ brand-specific (`card_ext.py`) and publishes it on `carStateSP.zoompilot.stockEc
 detailed reasons (camera settle, CAN, which UDS reply) stay in carlog.
 
 ### Moving takeover (Mazda)
+
+Removed 2026-10-10 before any on-car validation (the flag, the `MazdaMovingTakeover` param and the
+session manager's moving attempt); this section and the drive plan below describe the removed
+design, kept for whoever revives it from history.
 
 `RadarSessionManager(moving_takeover=...)`: the first takeover of a session may run while moving
 when `MazdaFlags.MOVING_TAKEOVER` is set. The flag comes from the developer's
@@ -248,7 +253,7 @@ resets an ECU or presses a button on the driver's behalf.
 
 ## Supported configurations
 
-- Moving takeover: only with `MazdaMovingTakeover` set by the developer (validation pending).
+- Moving takeover: none (removed 2026-10-10, never validated).
 - Moving hand-back (Force Offroad entry, cycle, reboot at speed): every alpha-long Mazda;
   on record at 117 km/h on the validation vehicle.
 - Every other Mazda alpha-long configuration: parked takeover at the next stop, with the

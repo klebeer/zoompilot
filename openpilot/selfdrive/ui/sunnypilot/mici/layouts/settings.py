@@ -30,6 +30,7 @@ from openpilot.system.ui.lib.multilang import tr
 # (a full params pass each) never register.
 OP.TogglesLayoutMici = TogglesLayoutMiciSP
 OP.DeveloperLayoutMici = DeveloperLayoutMiciSP
+OP.SoftwareLayoutMici = SoftwareLayoutSP
 
 SP_ICON = "../../sunnypilot/selfdrive/assets/offroad"
 BIG_ICON_SIZE = 110
@@ -51,9 +52,6 @@ class SettingsLayoutSP(OP.SettingsLayout):
 
     device_panel = DeviceLayoutMici()
     self._scroller._items[2].set_click_callback(lambda: gui_app.push_widget(device_panel))
-
-    # by label: an index mis-wires silently if the base list is ever reordered
-    self._replace_panel("software", SoftwareLayoutSP())
 
     self.icon_offroad_enable = gui_app.texture("../../sunnypilot/selfdrive/assets/icons_mici/always_offroad.png", BIG_ICON_SIZE,
                                                BIG_ICON_SIZE)
@@ -82,17 +80,23 @@ class SettingsLayoutSP(OP.SettingsLayout):
     sunnylink_btn = SunnylinkBigButton(tr("sunnylink"), "", gui_app.texture("../../sunnypilot/selfdrive/assets/icons_mici/sunnylink.png", 76, 44))
     sunnylink_btn.set_click_callback(lambda: gui_app.push_widget(sunnylink_panel))
 
+    always_offroad_desc = tr("Keeps the device offroad while the car is on, so zoompilot won't engage.\n" +
+                             "Settings that need the car off can be changed.")
+
     # onroad: enable button sits at the front (left of toggles)
-    self._enable_offroad_btn_onroad = BigCircleButton(self.icon_offroad_enable, red=True)
+    self._enable_offroad_btn_onroad = BigCircleButton(self.icon_offroad_enable, red=True, title=tr("enable always offroad"),
+                                                      description=always_offroad_desc)
     self._enable_offroad_btn_onroad.set_click_callback(lambda: self._handle_always_offroad(True))
     self._enable_offroad_btn_onroad.set_visible(lambda: ui_state.started and not ui_state.always_offroad)
 
     # offroad: enable button sits at the end (right of developer)
-    self._enable_offroad_btn_offroad = BigCircleButton(self.icon_offroad_enable, red=True)
+    self._enable_offroad_btn_offroad = BigCircleButton(self.icon_offroad_enable, red=True, title=tr("enable always offroad"),
+                                                       description=always_offroad_desc)
     self._enable_offroad_btn_offroad.set_click_callback(lambda: self._handle_always_offroad(True))
     self._enable_offroad_btn_offroad.set_visible(lambda: not ui_state.started and not ui_state.always_offroad)
 
-    self._disable_offroad_btn = BigCircleButton(self.icon_offroad_disable, red=False)
+    self._disable_offroad_btn = BigCircleButton(self.icon_offroad_disable, red=False, title=tr("exit always offroad"),
+                                                description=tr("Ends always offroad, so zoompilot can engage again."))
     self._disable_offroad_btn.set_click_callback(lambda: self._handle_always_offroad(False))
     self._disable_offroad_btn.set_visible(lambda: ui_state.always_offroad)
 
@@ -100,7 +104,7 @@ class SettingsLayoutSP(OP.SettingsLayout):
     for i, btn in enumerate(sp_buttons):
       items.insert(1 + i, btn)
     # sunnylink sits right after software (base order: toggles, network, device,
-    # software, pair, firehose, developer, shifted by the sp panels above)
+    # software, firehose, developer, shifted by the sp panels above)
     items.insert(len(sp_buttons) + 4, sunnylink_btn)
 
     # front slots (only one ever visible at a time): exit-always-offroad, then enable-onroad
@@ -112,10 +116,6 @@ class SettingsLayoutSP(OP.SettingsLayout):
     self._scroller._items.clear()
     for item in items:
       self._scroller.add_widget(item)
-
-  def _replace_panel(self, label: str, panel) -> None:
-    btn = next(btn for btn in self._scroller.items if btn.get_text() == label)
-    btn.set_click_callback(lambda: gui_app.push_widget(panel))
 
   def _update_state(self):
     super()._update_state()

@@ -35,7 +35,6 @@ jobs:
       onnx_path: ${{ steps.resolve.outputs.onnx_path }}
       hf_defaults_path: ${{ steps.resolve.outputs.hf_defaults_path }}
       tinygrad_ref: ${{ steps.resolve.outputs.tinygrad_ref }}
-      compile_ref: ${{ steps.resolve.outputs.compile_ref }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -67,8 +66,6 @@ jobs:
             exit 1
           fi
 
-          COMPILE_REF=$(python3 openpilot/sunnypilot/models/compile_ref.py)
-
           SAFE_NAME="${NAME// /-}"
           echo "model_name=${NAME}" >> $GITHUB_OUTPUT
           echo "safe_model_name=${SAFE_NAME}" >> $GITHUB_OUTPUT
@@ -76,7 +73,6 @@ jobs:
           echo "onnx_path=${ONNX_PATH}" >> $GITHUB_OUTPUT
           echo "hf_defaults_path=${HF_DEFAULTS_PATH}" >> $GITHUB_OUTPUT
           echo "tinygrad_ref=${TINYGRAD_REF}" >> $GITHUB_OUTPUT
-          echo "compile_ref=${COMPILE_REF}" >> $GITHUB_OUTPUT
 
   build_small_model:
     needs: resolve
@@ -373,7 +369,6 @@ jobs:
             --onnx-ref "${{ needs.resolve.outputs.onnx_ref }}" \
             --model-name "${{ needs.resolve.outputs.model_name }}" \
             --tinygrad-ref "${{ needs.resolve.outputs.tinygrad_ref }}" \
-            --compile-ref "${{ needs.resolve.outputs.compile_ref }}" \
             --run-number "${{ github.run_number }}"
 
       - name: Download DM artifact
@@ -446,7 +441,6 @@ jobs:
             --onnx-ref "${{ needs.resolve.outputs.onnx_ref }}" \
             --model-name "${{ needs.resolve.outputs.model_name }}" \
             --tinygrad-ref "${{ needs.resolve.outputs.tinygrad_ref }}" \
-            --compile-ref "${{ needs.resolve.outputs.compile_ref }}" \
             --run-number "${{ github.run_number }}"
 
   build_dm_model:

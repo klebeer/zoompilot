@@ -12,15 +12,11 @@ session cap and block synthesized button output. See docs/zoompilot/cruise-arbit
 """
 from dataclasses import dataclass
 
-import numpy as np
-
 from openpilot.cereal import custom
 from opendbc.car import structs
-from opendbc.car.interfaces import V_CRUISE_MAX
 from opendbc.car.structs import car
 from openpilot.common.constants import CV
 from openpilot.common.realtime import DT_CTRL
-from openpilot.sunnypilot.selfdrive.car.intelligent_cruise_button_management.helpers import get_minimum_set_speed
 from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit import ACTIVE_STATES, V_CRUISE_UNSET
 from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.common import Mode
 from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.helpers import compare_cluster_target, confirm_needed_for_change, pcm_machine_owns_sla, \
@@ -58,7 +54,8 @@ class CruiseArbiter:
   def __init__(self, CP, CP_SP):
     # The planner-side machine keeps only the cars whose setpoint nobody but the driver can
     # move; a reachable setpoint (openpilot's own, or the ICBM buttons) is arbitrated here.
-    self.applicable = not pcm_machine_owns_sla(CP, CP_SP)
+    self.CP = CP
+    self.applicable = self._applicable_for(icbm_active=not CP_SP.pcmCruiseSpeed)
     # ICBM platforms adopt the ECU setpoint; non-pcm openpilot longitudinal writes it here.
     self.op_owns_setpoint = not CP.pcmCruise
 
@@ -91,9 +88,21 @@ class CruiseArbiter:
     # The cruise helper uses this to close reconciliation before it runs.
     self.adopted_this_frame = False
 
+  def set_icbm_active(self, icbm_active: bool) -> None:
+    """card's ICBM latch moved (only while disengaged): on Mazda alpha long the session owner
+    moves with it between this arbiter and the plannerd machine."""
+    applicable = self._applicable_for(icbm_active)
+    if applicable != self.applicable:
+      self.applicable = applicable
+      self._set_state(SessionState.disabled)
+      self.v_cap = V_CRUISE_UNSET
+      self._press.clear()
+
+  def _applicable_for(self, icbm_active: bool) -> bool:
+    return not pcm_machine_owns_sla(self.CP, icbm_active)
+
   def read_params(self, params):
-    if not self.applicable:
-      return
+    # read even while the plannerd machine owns the session: ICBM can hand it back here
     self.enabled = params.get("SpeedLimitMode", return_default=True) == Mode.assist
     self.is_metric = params.get_bool("IsMetric")
 
@@ -163,7 +172,8 @@ class CruiseArbiter:
   def _classify_presses(self, CS, v_cruise_kph: float) -> float:
     """Consume button edges; decide intents from the pre-frame session snapshot.
 
-    Returns v_cruise_kph, possibly raised by an upward confirm adoption."""
+    Returns v_cruise_kph, possibly raised by an upward confirm adoption. Unclipped: the cruise
+    helper applies its floor to whatever the arbiter adopts."""
     self.adopted_this_frame = False
     if self._press:
       # Release ownership lasts through the release frame.
@@ -180,8 +190,7 @@ class CruiseArbiter:
           # A press dismisses an active session. Re-anchor openpilot-owned setpoints to the
           # active cap before applying the press; ICBM platforms adopt the ECU's result.
           if self.op_owns_setpoint and self.v_cap < V_CRUISE_UNSET:
-            anchor = min(v_cruise_kph, self.target_kph)
-            v_cruise_kph = float(np.clip(round(anchor, 1), get_minimum_set_speed(self.is_metric), V_CRUISE_MAX))
+            v_cruise_kph = min(v_cruise_kph, self.target_kph)
             self.adopted_this_frame = True
             self._press[btn] = _Press(_PRESS_NORMAL)
           else:
@@ -228,7 +237,7 @@ class CruiseArbiter:
       press.resolved = True
       self.last_intent = CruiseIntent.confirm
       if is_plus and self.target_kph > v_cruise_kph:
-        v_cruise_kph = float(np.clip(round(self.target_kph, 1), get_minimum_set_speed(self.is_metric), V_CRUISE_MAX))
+        v_cruise_kph = self.target_kph
         self.adopted_this_frame = True
       self._activate(from_prompt=True)
     else:
@@ -333,5 +342,5 @@ class CruiseArbiter:
     confirm. Down moves (a curve) go through; nothing confirms on a dash the servo moved."""
     Send = structs.IntelligentCruiseButtonManagement.SendButtonState
     icbm = CC_SP.intelligentCruiseButtonManagement
-    if self.applicable and self.prompting and icbm.sendButton in (Send.increase, Send.increaseHold):
+    if self.applicable and self.prompting and icbm.sendButton == Send.increase:
       icbm.sendButton = Send.none

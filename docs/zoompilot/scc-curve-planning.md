@@ -2,9 +2,9 @@
 
 Code: `openpilot/sunnypilot/selfdrive/controls/lib/smart_cruise_control/`: the shared
 `limits.py` and `speed_profile.py`, zoompilot's planners in `zoompilot/`
-(`vision_controller.py`, `map_controller.py`, `smart_cruise_control.py`), sunnypilot's own
+(`vision_controller.py`, `map_controller.py`), sunnypilot's own
 planners beside them, and the two SLA publishers in `controls/lib/speed_limit/`
-(`speed_limit_assist.py`, `assist_mirror.py`). Tests: `smart_cruise_control/tests/`,
+(`speed_limit_assist_zp.py`, `assist_mirror.py`). Tests: `smart_cruise_control/tests/`,
 `smart_cruise_control/zoompilot/tests/`, `speed_limit/tests/`. Tools:
 `tools/mazda_long/decel_overshoot/` (`icbm.md`, Tools).
 
@@ -16,7 +16,7 @@ have been measured from their logs) run the zoompilot vision and map planners th
 describes. Every other brand runs sunnypilot's `vision_controller.py`, `map_controller.py` and
 `smart_cruise_control.py`, kept byte-identical to sunnypilot master together with their tests,
 so an unmeasured brand is not tuned on Mazda data and a sync never conflicts there. Only the
-zoompilot vision planner publishes `vAheadMin`; on every other brand it is 0, which leaves
+zoompilot vision planner publishes `sccVAheadMin`; on every other brand it is 0, which leaves
 ICBM's restore on its stillness heuristic (`icbm.md`). `limits.py`, `speed_profile.py` and
 `publish_ramp` stay shared with the SLA publishers on every brand.
 
@@ -45,9 +45,9 @@ actuation lead are picked once.
   planner, which cannot be imported (it imports the SP overlay); `test_limits.py` reads
   the upstream source and pins the mirror.
 - **stock ACC**: budget is the decel the overshoot lever holds the ECU to (mazda 0.75,
-  the budget column of `DECEL_OVERSHOOT_PARAMS`; unmeasured brands 0.5, where being wrong
-  only means braking earlier), response 1.0 s, plus the time to walk the dash down by
-  the tracking gap at the measured servo walk rate (mazda 8 mph at 4 mph/s). The ECU
+  the budget column of the actuation profile's `decel_overshoot`; unmeasured brands 0.5,
+  where being wrong only means braking earlier), response 1.0 s, plus the time to walk the
+  dash down by the tracking gap at the measured servo walk rate (mazda 8 mph at 4 mph/s). The ECU
   brakes on the gap as soon as it opens and the lever tracks `vEgo` down from there, so
   the rest of a deep dip is not dead time; leading by the whole dip committed a 30 mph
   drop 5 s early. The native 5 mph hold grid must not size the lead: synthesized holds
@@ -97,6 +97,16 @@ be taken at the set speed: at 70 mph a perfectly reported r=645 m bend 100 m out
 m/s^2 at the set speed, under the ceiling) commits on both paths and walks the dash down
 6 mph for nothing. Inside the band the gain is measured; above it the raw path decides,
 which is the pre-gain behaviour.
+
+The band is keyed on `vEgo`, so braking for a highway bend takes the car under 50 mph and
+brings the full gain back mid-approach. On stock ACC the profile minimum is the dash target,
+so there the gain sets how slow the car goes, not only when it brakes. Route 2c0 (10-13,
+set 55, big model): a bend the car drove at 3.8e-3 read 4.6-5.3e-3 at 85-250 m; times up to
+1.45 the target went to 33 mph and the dash to 30, where the raw read said 43 and the curve
+needed 47 at the ceiling, and the car bottomed at 41.5. On the 10-13 corpus (212 routes) the
+big model above 50 mph reads 0.95-1.0 of the driven curvature to 120 m and 0.87-0.90 to
+200 m. From a 55 mph set speed (`_KAPPA_DEPTH_SET_BP`, 45 to 55 mph) the speed profile takes
+the raw read; the corrected one still drives `a_required`, so the brake point does not move.
 
 ## The highway horizon
 
@@ -190,7 +200,7 @@ path limits the car below `vEgo + _IN_CURVE_MARGIN` (1 m/s; the car is in the cu
 the required decel is above `_RELEASE_FRAC = 0.3` of the budget, so the gate does not chatter
 on noise. Until 10-04 the near path was held against the set speed, and on a winding road any
 gentle bend kept the plan (and the dash) down through the whole exit. After release the ICBM
-restore is still capped at `vAheadMin`, so the dash only climbs to the next dip. The
+restore is still capped at `sccVAheadMin`, so the dash only climbs to the next dip. The
 state machine (`entering`, `turning`, `leaving`) is display-only.
 
 Near convergence a bumper-distance constraint makes `required_decel` scream through its
@@ -208,7 +218,7 @@ over 2.2 m/s^2 at <= 45 mph: 65 of 149 with the old servo, 72 with no hold).
 So on stock ACC below `_HOLD_V_MAX` (22.4 m/s, 50 mph) a bend that has bound (`a_required` at
 30% of the budget or more) for `_HOLD_SEEN_T = 2.0 s` is latched with its profile speed and
 remaining distance, and held until the near window reaches it; a deeper bend replaces it. The
-held bend keeps the solver active, caps `vAheadMin`, and asks for the budget at most, like any
+held bend keeps the solver active, caps `sccVAheadMin`, and asks for the budget at most, like any
 prediction. The latch clears when the near window reaches the bend, on release, at 50 mph, and
 never runs on openpilot long.
 
@@ -300,6 +310,25 @@ slowest point of the plan, past which the P candidate is already railed at the b
 
 ## Route sim, before and after
 
+### 10-13: curve-speed ceiling, raw depth from a 55 mph set
+
+Rebuilt on device_data (212 routes, 473 curve approaches, refit plant), vision only, stock
+ACC. Base is 347240ff5e; after is the curve-speed ceiling (2.2 / 2.1 / 2.2 at 35 / 55 / 70
+mph) with the raw-read depth from a 55 mph set. "Under" is mph below the curve's speed at
+1.71 m/s^2 (negative: faster than that).
+
+| set speed | curves | apex lat p50 | over 2.2 | over 2.6 | under p90 | time lost p50 / p90 s |
+|---|---|---|---|---|---|---|
+| <= 45 mph | 150 | 1.93 -> 2.07 | 47 -> 66 | 30 -> 30 | 5.5 -> 4.1 | 3.8/6.7 -> 3.2/5.6 |
+| 50-55 mph | 42 | 1.84 -> 1.97 | 10 -> 15 | 6 -> 7 | 6.0 -> 1.9 | 2.2/4.4 -> 1.2/2.9 |
+| 60+ mph | 26 | 1.82 -> 2.12 | 4 -> 11 | 2 -> 2 | 3.6 -> -3.1 | 1.5/3.3 -> 0.3/2.0 |
+
+Over 2.2 rises because 2.2 is now the ceiling; the severe count (2.6) holds. Straight-road
+slowdowns over 2 mph: 5 -> 2 of 188 at 50-55, none at 60+. Alone, the raw depth took the
+50-55 band's under p90 from 6.0 to 4.0 and the ceiling the rest. A set-speed-keyed ceiling
+at the same values replays within 0.1 m/s^2 and 0.3 s; the curve key is chosen because the
+set speed says nothing about the bend (a tight bend on a 55 mph road, a ramp at an 80 set).
+
 ### 10-04: target follows the profile, release on vEgo, set-speed ceiling
 
 Rebuilt on device_data (189 routes, refit plant), vision only, stock ACC, road curves. Base is
@@ -377,7 +406,8 @@ for every brand with a measured plant (`icbm.md`).
 | name | value | measurement | route |
 |---|---|---|---|
 | `TUNED_BRANDS` | `('mazda',)` | brands with a measured stock ACC response | n/a |
-| `_A_LAT_REG_V_BP` / `_V` | 17.9 to 26.8 m/s set speed -> 2.0 to 1.8 m/s^2 | lateral ceiling, keyed on the set speed so it does not rise as the car slows. 2.0 until 09-30, when route 260's entries felt late and hot (apexes 2.1-2.4, with the near floor that released bends late, since removed); 1.8 everywhere until 10-04, when drivers called back roads too slow; the highway end keeps 1.8 | route 260, user reports |
+| `_A_LAT_CURVE_BP` / `_A_LAT_CURVE` | 15.6 / 24.6 / 31.3 m/s curve speed -> 2.2 / 2.1 / 2.2 m/s^2 | lateral ceiling (v^2 * curvature) at the curve's own speed (`curve_speed`, the table re-keyed on curvature). Driver-limited curves (129, corpus) p75 2.3 below 45 mph, 2.0 at 45-55; logged interstate curves are banked 2.5-4 deg (0.4-0.65 m/s^2 not felt). History: 2.0 flat until 09-30; 1.8 after route 260; set-keyed 2.0 -> 1.8 (40 -> 60 mph set) from 10-04 until 10-13, when 55+ was too slow and back roads a tad slow | 10-13 route sim, user reports |
+| `_KAPPA_DEPTH_SET_BP` | 20.1 to 24.6 m/s set speed | the range gain stops setting the dash target from a 55 mph set (timing keeps it) | route 2c0, 10-13 route sim |
 | `_IN_CURVE_MARGIN` | 1.0 m/s | the plan holds while the near field limits the car below `vEgo` plus this | user reports |
 | `_PLAN_MARGIN` | 0.95 | 13% -> 5% of fair apexes above 2.2 for 1.4% speed | corpus sim |
 | `COMMIT_FRAC` | 0.7 | swept with the margin | corpus sim |
@@ -389,11 +419,11 @@ for every brand with a measured plant (`icbm.md`).
 | `_HOLD_V_MAX` / `_HOLD_SEEN_T` | 22.4 m/s / 2.0 s | far read flickers below 50 mph; latch sweep above | route sim, 149 curves, 228 straights |
 | `_CONFIRM_V_BP` / `_CONFIRM_T` (map) | 20.1 to 22.4 m/s -> 0 to 2.5 s | phantoms up to 2.1 s (one 6 s), real 5.0-12.6 s; drops 7 of 10 phantoms, tightest real slack 0.58 s | 6.2 h map on, 65 episodes |
 | `_OP_LONG_A_BUDGET` | 1.2 m/s^2 | `A_CRUISE_MIN` | upstream |
-| `_STOCK_A_BUDGET['mazda']` | 0.75 m/s^2 | the overshoot table's budget column (10 / 7.75 mph gap at 45 / 65) | 115,878 samples, 50 routes |
-| `_SERVO_TRACK_GAP['mazda']` | 8 mph | the overshoot gap at budget, 7.75 to 10 mph by speed | same |
-| `_STOCK_A_BUDGET_DEFAULT` | 0.5 m/s^2 | estimate, safe direction | n/a |
+| `stock_a_budget` (mazda profile) | 0.75 m/s^2 | the overshoot table's budget column (10 / 7.75 mph gap at 45 / 65) | 115,878 samples, 50 routes |
+| `track_gap` (mazda profile) | 8 mph | the overshoot gap at budget, 7.75 to 10 mph by speed | same |
+| `stock_a_budget` (default profile) | 0.5 m/s^2 | estimate, safe direction | n/a |
 | `_STOCK_RESPONSE_T` | 1.0 s | estimate, erring large | n/a |
-| `_SERVO_WALK_RATE['mazda']` | 4.0 mph/s | 4.1 hold frames, 3.8 taps | route 126 |
+| `walk_rate` (mazda profile) | 4.0 mph/s | 4.1 hold frames, 3.8 taps | route 126 |
 | `A_PUB_MIN` / `PUB_JERK` | -2.0 m/s^2 / 2.0 m/s^3 | stock publication depth for measured geometry, and ramp | n/a |
 | `D_FLOOR` | 0.5 m | division floor for a constraint at the bumper | n/a |
 | `_T_FALLBACK` (map) | 2.8 s | decel horizon for a degenerate distance | n/a |

@@ -35,6 +35,7 @@ from openpilot.sunnypilot.selfdrive.car.intelligent_cruise_button_management.con
 from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.assist_mirror import SpeedLimitAssistMirror
 from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.common import Mode
 from openpilot.sunnypilot.selfdrive.selfdrived.events import EventsSP
+from openpilot.sunnypilot.selfdrive.car.tests.icbm_servo_harness import INCREASE_HOLD, DECREASE_HOLD, send_of
 
 ButtonEvent = car.CarState.ButtonEvent
 ButtonType = car.CarState.ButtonEvent.Type
@@ -152,7 +153,7 @@ class Loop:
     # op_long: Mazda alpha long, openpilot commands acceleration but the body keeps the
     # setpoint, so the same arbiter, mirror and servo own the session
     CP = car.CarParams(pcmCruise=True, brand="mazda", openpilotLongitudinalControl=op_long)
-    CP_SP = custom.CarParamsSP(pcmCruiseSpeed=False)
+    CP_SP = custom.CarParamsSP(pcmCruiseSpeed=False, intelligentCruiseButtonManagementAvailable=True)
     self.helper = VCruiseHelper(CP, CP_SP)
     self.sla = self.helper.cruise_arbiter  # 100 Hz session truth; .state as before
     self.mirror = SpeedLimitAssistMirror(CP, CP_SP)  # plannerd side: plan cap + events
@@ -205,7 +206,7 @@ class Loop:
     # vision lookahead wire: 0 = no lookahead (default for these tests); a test can set
     # lookahead_mph to model the horizon seeing a dip beyond the current source flip
     if self.lookahead_mph is not None:
-      LP_SP.smartCruiseControl.vision.vAheadMin = float(self.lookahead_mph * self.u_ms)
+      LP_SP.zoompilot.sccVAheadMin = float(self.lookahead_mph * self.u_ms)
     LP_SP.aTarget = float(self.a_target)
     # the servo reads each limiter's own request, not the MPC's railed aTarget
     LP_SP.smartCruiseControl.vision.aTarget = float(self.a_target)
@@ -274,7 +275,8 @@ class Loop:
         self.helper.cruise_arbiter.fill_msg(session_msg)
         self.events_sp.clear()
         v_ego_mph = self.v_ego_mph if self.v_ego_mph is not None else self.helper.v_cruise_kph / self.u_kph
-        self.mirror.update(session_msg.zoompilot.cruiseSession, v_ego_mph * self.u_ms, 0., 0., self.events_sp)
+        self.mirror.session = session_msg.zoompilot.cruiseSession
+        self.mirror.update(True, False, v_ego_mph * self.u_ms, 0., 0., 0., 0., False, 0., self.events_sp)
         self.sla_events.extend((self.tick_n, e) for e in self.events_sp.events)
 
       # selfdrived: servo against the real dash; the session state it sees is the one
@@ -290,16 +292,16 @@ class Loop:
       # same-frame session state (the servo's own freeze is one hop stale), as
       # card.controls_update does before CI.apply.
       tap_dir, forged_hold_dir = driver_tap_dir, 0
-      sb = self.servo.cruise_button
+      sb = send_of(self.servo)
       if self.helper.cruise_arbiter.prompting:
         sb = SendButtonState.none
       if sb == SendButtonState.increase:
         tap_dir = tap_dir or 1
       elif sb == SendButtonState.decrease:
         tap_dir = tap_dir or -1
-      elif sb == SendButtonState.increaseHold:
+      elif sb == INCREASE_HOLD:
         forged_hold_dir = 1
-      elif sb == SendButtonState.decreaseHold:
+      elif sb == DECREASE_HOLD:
         forged_hold_dir = -1
       self.ecu.tick(tap_dir=tap_dir, hold_dir=driver_hold_dir, forged_hold_dir=forged_hold_dir)
 

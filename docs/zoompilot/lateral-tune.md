@@ -6,10 +6,10 @@ justified them is here. Routes are the CX-5 2022 test car's unless stated. The a
 plan for the next on-car pass is in `lateral-tune-roadmap.md`.
 
 Files: `openpilot/sunnypilot/selfdrive/controls/lib/latcontrol_torque_v2.py` (the tune),
-`latcontrol_torque_ext.py` and `latcontrol_torque_ext_override.py` (the shared extension:
-EPS rail, speed-dependent torque), `steer_limit.py` (the classifier),
-`controlsd_ext.py` (wiring), `openpilot/sunnypilot/selfdrive/locationd/torqued_ext.py` (the
-speed-bin learner and its cache), `openpilot/sunnypilot/selfdrive/car/interfaces.py` (the
+`latcontrol_torque_ext_zp.py` (the fork layer on the shared extension:
+EPS rail, speed-dependent torque, manual override scale), `steer_limit.py` (the classifier),
+`controls_lateral_zp.py` (wiring), `openpilot/sunnypilot/selfdrive/locationd/speed_bin_learner.py` (the
+speed-bin learner and its cache), `openpilot/sunnypilot/selfdrive/car/mazda_torque_seed.py` (the
 Mazda seed).
 
 ## Lineage
@@ -18,12 +18,12 @@ Mazda seed).
 |---|---|---|
 | v0 | sunnypilot's `latcontrol_torque_v0.py`: setpoint == the live request, error corrected in lateral-accel space, the extension owning the feedforward params. Byte-identical to sunnypilot's; the only change it sees is the corrected `steer_limited_by_safety` flag from the classifier. | `TorqueControlTune = 0.0`, and any torque car with Enforce Torque Control off (`torque_tune.resolved_tune_versions`) |
 | v1 | sunnypilot's current `LatControlTorque` (the `lac` controlsd built), untouched | `TorqueControlTune = 1.0` |
-| v2 | v0 plus the four mechanisms below | `TorqueControlTune = 2.0`; seeded on steer-to-zero Mazdas by `_seed_mazda_torque_defaults` (`MAZDA_STEER_TO_ZERO_TORQUE_TUNE = 2.0`) |
+| v2 | v0 plus the four mechanisms below | `TorqueControlTune = 2.0`; seeded on steer-to-zero Mazdas by `seed_mazda_torque_defaults` (`MAZDA_STEER_TO_ZERO_TORQUE_TUNE = 2.0`) |
 
 `TorqueControlTune` is the small-model tune, declared default v0 (v2 on the seeded Mazdas).
 `TorqueControlTuneBig` picks the tune for a big model (chestnut or jetlink), declared default
 v1 for every brand (2026-09-11: v1 drove the big models better, v2 the small ones); with
-Enforce Torque Control off both run v0. `controlsd_ext.initialize_lateral_control` builds one
+Enforce Torque Control off both run v0. `ControlsLateralZP.initialize_lateral_control` builds one
 controller per size at startup and `select_lateral_control` swaps `self.LaC` at the end of
 any frame whose `modelV2.big` differs from the running controller's, resetting the incoming
 one. That is safe by construction: a promotion only happens disengaged, where controlsd resets
@@ -73,7 +73,7 @@ p90). The ramp cut replay release slew p90 from 29.4 to 14.7 /s.
 
 ### 3. Low-speed D term, gated while pressed
 
-`KD_SCHEDULE = [7.5, 10, 12, 14.5] m/s -> [1.65, 1.05, 0.85, 0.0]`, i.e. `kd = 0.3 s * KP(v)`,
+`KD_INTERP_SPEEDS = [7.5, 10, 12, 14.5] m/s -> KD_INTERP = [1.65, 1.05, 0.85, 0.0]`, i.e. `kd = 0.3 s * KP(v)`,
 capped below 7.5 m/s and zero by 14.5 m/s. The D input is `-measurement_rate` (v0 already
 feeds it; v0 keeps KD = 0) and is zeroed while `steeringPressed`, because the measured rate
 is then the driver's.
@@ -129,6 +129,30 @@ friction included; the KP schedule is v0's at every speed; the extension's outpu
 | budget clip | worse p99 |
 | command clamp to apply | a no-op in sim: apply's rate limiter makes its trajectory identical however far the command leads |
 
+## Tried and rejected
+
+Numbers from the toy plant the controller tests drive (`controls/lib/tests/torque_harness.py`:
+curvature proportional to steering angle, torque = lateral accel / latAccelFactor 2.5,
+friction 0.25, 0.3 s delay). The tests that pinned these alternatives were dropped on
+2026-10-10; the shipped behaviour each one argued for keeps its own test.
+
+- v0's lateral-accel request buffer in v2: braking from 20 to 10 m/s at 4 m/s^2 through a
+  constant 2e-3 1/m arc, it replays the old speed's lateral accel as a phantom jerk of
+  0.31 m/s^3. v0's setpoint is the live request, so there the phantom only reaches the jerk
+  log; behind v2's friction input the same buffer moves the friction term by 0.085 m/s^2.
+  The curvature buffer reads 0 jerk and 0.0002 m/s^2 of friction on the same run.
+- Engaging v2 without priming the buffer while inactive: into a held 1.0 m/s^2 at 9 m/s the
+  stale buffer reads the hold as jerk, and the friction term pushes against it, down to
+  -0.63 m/s^2 within the 0.3 s delay window. After 100 inactive frames the first active
+  frame has zero error, jerk, friction and D. v0 needs no priming for its command (error 0),
+  but its log shows the stale buffer as 3.3 m/s^3 of jerk on that frame.
+- Swapping the torque tune on the frame the model changes: on the 2026-09-29 drives a
+  big-to-small hand-back while steering stepped the commanded torque by 0.09 to 0.19 of full
+  scale in one tick. On the toy plant an idle v2 holding state from a -1.5 m/s^2 curve at
+  20 m/s, taking over a steady 0.8 m/s^2 curve at 10 m/s, steps it by 1.31 against 6e-6 for
+  the largest steady tick before the swap. The tune that was steering now keeps the new model
+  until lateral has been inactive for `TUNE_SWAP_INACTIVE_FRAMES` (0.5 s).
+
 ## Shared layer
 
 ### Steer-limit classifier (`steer_limit.py`)
@@ -167,7 +191,7 @@ carOutput, so a starved EPS looks clean here; the carcontroller's non-delivery l
 Replay A/B of the directional freeze (routes 132/139): corner |i| falls 4 to 6x,
 stale-integrator-vs-error frames 59% -> 5%, open-loop output delta < 0.014.
 
-### EPS rail via `steer_max` (`latcontrol_torque_ext.py`)
+### EPS rail via `steer_max` (`latcontrol_torque_ext_zp.py`)
 
 `get_steer_rail_schedule(CP)` gives EPS_CEILING / STEER_MAX: on the CX-5 the rail falls
 monotonically from 1148/1200 = 0.96 below 8 m/s to 620/1200 = 0.52 from 14.5 m/s up. The
@@ -233,16 +257,19 @@ EPS. Each substitutes the CX-5 2022 table under `requires_steer_to_zero`: the ta
 behind that EPS firmware. On its stock EPS the entry is withheld (a steering floor and the
 firmware's dead band) and the car learns default bins from its global seed.
 
-## Speed-bin learner and cache (`torqued_ext.py`)
+## Speed-bin learner and cache (`speed_bin_learner.py`)
 
 Each bin is a `TorqueBuckets` with per-bucket minimums = the global learner's / n_bins,
 fed by `_on_torque_point` after upstream's quality filters. `_estimate_params_speed_binned`
 runs upstream's total-least-squares fit per bin, clips to +-sanity of the seed (upstream's
 FACTOR_SANITY 0.3 / FRICTION_SANITY 0.5; 1.0 / 1.0 with the relaxed toggle), advances the
 bin's filter decay from MIN_FILTER_DECAY 50 toward MAX 250 as upstream does, and resets a bin
-that goes NaN with valid data. Bins come from `speed_dependent.toml` or the defaults seeded
-with the global offline values. A bin refits whenever a point has been routed to it since its
-last fit. Until 2026-09-30 the test was the bucket length, which stops changing once all eight
+that goes NaN. As upstream gates its global filter, a bin is fit and filtered only once it is
+valid (every bucket at its minimum); until then it publishes its seed or the value restored
+from its cache, and the controller takes every bin as published (since 2026-10-10; before,
+calculable bins were filtered and the controller swapped invalid ones for the TOML seeds or the
+live global values). Bins come from `speed_dependent.toml` or the defaults seeded with the
+global offline values. A bin refits whenever a point has been routed to it since its last fit. Until 2026-09-30 the test was the bucket length, which stops changing once all eight
 ring buffers are full (12000 points) while new points keep replacing old ones, so a full bin
 froze at whatever it had learned when it filled: on the test car every bin above 16 m/s was
 full, and the device's values sat within 5% of the seeds while a refit of its own cached
@@ -251,12 +278,12 @@ and the first of them keeps the lower edge the full table gives it (`min_speed`)
 reaching down over the floor and the dead band to 5 m/s.
 
 Wire. The per-bin values do not ride on `lateralTorqueParameters` (comma's struct, which an
-upstream sync would collide on). torqued_ext publishes its own `liveTorqueParametersSP`
+upstream sync would collide on). The learner publishes its own `liveTorqueParametersSP`
 message beside every upstream one, at the same 4 Hz cadence and validity: `version`,
 `speedBinCenters`, `speedBinLatAccelFactors`, `speedBinFrictions`, `speedBinValid`,
 `speedBinPoints` (empty on the wire). On the wire the service is `customReserved19`, the
 last of sunnypilot's reserved Event slots, so `log.capnp` stays byte-identical to upstream;
-`torqued_ext.LIVE_TORQUE_PARAMETERS_SP_SERVICE` names it and `LiveTorqueParametersSP`
+`speed_bin_learner.LIVE_TORQUE_PARAMETERS_SP_SERVICE` names it and `LiveTorqueParametersSP`
 aliases the struct (`custom.CustomReserved19`).
 
 Cache. torqued writes `LiveTorqueParameters` every 240 frames (60 s) with `with_points=True`;
@@ -268,9 +295,11 @@ points.
 Restore (`_restore_ext_cache`, guards added 2026-09-02 in `fbabecf35c`): both caches
 must carry upstream's restore key (fingerprint, tuning type, offline seeds, VERSION, via
 `CarParamsPrevRoute`) and the fork cache this config's `seed_version` and bin centers; filtered values are
-taken only when upstream's cache was written valid; anything non-finite or outside a bin's
-clip range rejects the whole cache, because the bins are one interpolated tune and a partial
-restore leaves a step between a cached bin and a re-seeded neighbour. The decay is restored
+taken only when upstream's cache was written valid. Each bin is judged on its own: a value
+that is non-finite or outside its clip range reseeds that bin alone, at MIN decay, and the
+rest restore. Until 2026-10-13 one such bin rejected the whole cache, so a seed refresh that
+kept `seed_version` or switching less-restrict off could put every bin back on its seed for
+the drive. The decay is restored
 from upstream's cache rather than reset to MIN each boot (which had made the bins re-learn
 five times faster after every restart). The points are checked on their own (bin count,
 finiteness); when they fail, the values still restore and the buckets start empty. A fork
@@ -335,6 +364,25 @@ A refit of the cached points (7,400 to 12,000 per bin) leads the filter the same
 14% under the old seeds at 9.5 and 12 m/s, friction within 15% everywhere. The 10-01 friction
 refit overshot below 16.4 m/s. 34.5 and 37 m/s still have no points and keep their values;
 seed_version stays 2.
+
+Learned values and a crawl bin (2026-10-13, seed_version 3). Every bin on the test car is full
+(10,000 to 12,000 points; 34.5 and 37 m/s learned since 10-04), and the table takes its filtered
+values (device on 347240ff5, relaxed band, decay 250):
+
+| center (m/s) | 3.5 | 6.5 | 9.5 | 12.0 | 16.4 | 21.0 | 28.0 | 34.5 | 37.0 |
+|---|---|---|---|---|---|---|---|---|---|
+| LAF | 1.80 (new) | 2.16 (2.37) | 2.37 (2.63) | 1.94 (2.13) | 1.69 (1.74) | 1.80 (1.85) | 1.96 (2.27) | 2.20 (2.54) | 2.31 (2.56) |
+| friction | 0.220 (new) | 0.206 (0.201) | 0.151 (0.145) | 0.143 (0.135) | 0.140 (0.134) | 0.122 (0.104) | 0.105 (0.084) | 0.095 (0.071) | 0.085 (0.070) |
+
+The 3.5 m/s bin covers 2 to 5 m/s (`min_speed = 2.0`; its upper edge is the 5 m/s every other
+bin already had, so their ranges are unchanged). Below 2 m/s the lateral accel is mostly roll
+noise. It is fit with `speed_bin_seeds.py` over the test car's rlogs since 2026-09-30 (664
+segments, 5,934 points in the band): LAF 1.80 +-0.41, friction 0.253 +-0.009, the same on builds
+since 10-04 alone. Friction was asked to come out lower at a crawl; the data has it slightly
+higher. The offline fit reads friction 4 to 25% above the device's filtered values bin for bin
+(15% at 6.5 m/s), so the seed is 0.253 / 1.15 = 0.220. The LAF is noise-limited, as the 09-30
+cross-validation found for a 3 to 5 m/s bin, and is left for the learner to settle. The new
+centers retire every cache whatever the version; the bins restart at these values at MIN decay.
 
 ## Constants
 

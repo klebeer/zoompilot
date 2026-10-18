@@ -17,8 +17,6 @@ tinygrad_files = ["#"+x for x in glob.glob(env.Dir("#tinygrad_repo").relpath + "
                   if 'pycache' not in x and os.path.isfile(os.path.join(tinygrad_root, x))]
 
 camera_configs = [(c.width, c.height) for c in (_ar_ox_fisheye, _os_fisheye)]
-# the jetlink warp is keyed by camera the same way (sunnypilot/jetlink_adapter/SConscript)
-Export('camera_configs')
 
 if arch == 'comma_arm64':
   tg_flags = 'DEV=QCOM IMAGE=1 FLOAT16=1 NOLOCALS=1 JIT_BATCH_SIZE=0 OPENPILOT_HACKS=1'
@@ -27,6 +25,10 @@ else:
   tg_flags = 'DEV=METAL JIT=2' if arch == 'Darwin' else 'DEV=CPU:LLVM'
 
 CHESTNUT = chestnut_present()
+# zoompilot installs leave the big pkl out (see .lfsconfig); a chestnut build fetches it
+if CHESTNUT:
+  from openpilot.sunnypilot.models.big_model_source import ensure_big_pkl
+  CHESTNUT = ensure_big_pkl()
 if CHESTNUT:
   chestnut_tg_flags = 'DEBUG=1 DEV=USB+AMD:LLVM FRAME_DEV=CPU FLOAT16=1 JIT_BATCH_SIZE=0 GMMU=0 TC_OPT=2 TC_MIN_GLOBALS=32'
   # the USB+AMD GPU takes an exclusive flock; serialize all targets that touch it

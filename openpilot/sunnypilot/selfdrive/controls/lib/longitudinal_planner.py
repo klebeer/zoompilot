@@ -25,7 +25,8 @@ from openpilot.sunnypilot.selfdrive.controls.lib.lead_forecast.forecast import L
 from openpilot.sunnypilot.selfdrive.controls.lib.smart_cruise_control.zoompilot import make_smart_cruise_control
 from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.assist_mirror import SpeedLimitAssistMirror
 from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.helpers import pcm_machine_owns_sla
-from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.speed_limit_assist import SpeedLimitAssist
+from openpilot.sunnypilot.selfdrive.car.intelligent_cruise_button_management.icbm_latch import icbm_active
+from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.speed_limit_assist_zp import SpeedLimitAssistZP
 from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.speed_limit_resolver import SpeedLimitResolver
 from openpilot.sunnypilot.selfdrive.selfdrived.events import EventsSP
 from openpilot.sunnypilot.models.helpers import get_active_bundle
@@ -49,20 +50,20 @@ class LongitudinalPlannerSP:
     self.dec = DynamicExperimentalController(CP, mpc)
     self.e2e_set_speed = E2ESetSpeedController()
     self.e2e_lead_gap = E2ELeadGapController()
+    self.a_e2e = 0.  # the e2e candidate both lifts produced, for the floor's count of added speed
     self.lead_forecast = LeadForecast()
     self.lead_forecast.install(mpc)
     self.scc = make_smart_cruise_control(CP)
-    # SCC has nothing to act through without openpilot long or ICBM (pcmCruiseSpeed off), the
-    # same condition controlsd gates longActive on. Its params outlive that, so gate it here.
-    self.scc_actionable = CP.openpilotLongitudinalControl or not CP_SP.pcmCruiseSpeed
+    self.CP = CP
+    self.CP_SP = CP_SP
     self.resolver = SpeedLimitResolver(CP)
     # cars whose setpoint only the driver can move run the SLA machine here; everywhere
     # else it runs in card (the cruise arbiter, next to the buttons and the setpoint) and
-    # gets mirrored (speed_limit.helpers.pcm_machine_owns_sla)
-    if pcm_machine_owns_sla(CP, CP_SP):
-      self.sla = SpeedLimitAssist(CP, CP_SP)
-    else:
-      self.sla = SpeedLimitAssistMirror(CP, CP_SP)
+    # gets mirrored (speed_limit.helpers.pcm_machine_owns_sla). On Mazda alpha long the owner
+    # follows card's ICBM decision, which only moves between engagements.
+    self.sla_machine = SpeedLimitAssistZP(CP, CP_SP) if pcm_machine_owns_sla(CP, icbm_active=False) else None
+    self.sla_mirror = SpeedLimitAssistMirror(CP, CP_SP)
+    self.sla = self._sla_owner(not CP_SP.pcmCruiseSpeed)
     self.generation = int(model_bundle.generation) if (model_bundle := get_active_bundle()) else None
     self.source = LongitudinalPlanSource.cruise
     self.e2e_alerts_helper = E2EAlertsHelper()
@@ -78,6 +79,10 @@ class LongitudinalPlannerSP:
 
     return experimental_mode and self.dec.mode() == "blended"
 
+  def _sla_owner(self, icbm: bool):
+    # the machine exists only on pcm openpilot-long cars, where it owns SLA while ICBM is passive
+    return self.sla_machine if self.sla_machine is not None and not icbm else self.sla_mirror
+
   def update_targets(self, sm: messaging.SubMaster, v_ego: float, a_ego: float, v_cruise: float) -> tuple[float, float]:
     CS = sm['carState']
     v_cruise_cluster_kph = min(CS.vCruiseCluster, V_CRUISE_MAX)
@@ -87,18 +92,24 @@ class LongitudinalPlannerSP:
     long_override = sm['carControl'].cruiseControl.override
 
     # Smart Cruise Control
-    self.scc.update(sm, long_enabled and self.scc_actionable, long_override, v_ego, a_ego, v_cruise)
+    # SCC has nothing to act through without openpilot long or ICBM, the same condition
+    # controlsd gates longActive on. Its params outlive that, so gate it here.
+    icbm = icbm_active(sm['carStateSP'], self.CP_SP)
+    scc_actionable = self.CP.openpilotLongitudinalControl or icbm
+    self.scc.update(sm, long_enabled and scc_actionable, long_override, v_ego, a_ego, v_cruise)
 
     # Speed Limit Resolver
     self.resolver.update(v_ego, sm)
 
     # Speed Limit Assist
-    if self.sla.pcm_op_long:
-      has_speed_limit = self.resolver.speed_limit_valid or self.resolver.speed_limit_last_valid
-      self.sla.update(long_enabled, long_override, v_ego, a_ego, v_cruise_cluster, self.resolver.speed_limit,
-                      self.resolver.speed_limit_final_last, has_speed_limit, self.resolver.distance, self.events_sp)
-    else:
-      self.sla.update(sm['carStateSP'].zoompilot.cruiseSession, v_ego, self.resolver.distance, a_ego, self.events_sp)
+    sla = self._sla_owner(icbm)
+    if sla is not self.sla:
+      sla.reset()
+      self.sla = sla
+    self.sla_mirror.session = sm['carStateSP'].zoompilot.cruiseSession
+    has_speed_limit = self.resolver.speed_limit_valid or self.resolver.speed_limit_last_valid
+    self.sla.update(long_enabled, long_override, v_ego, a_ego, v_cruise_cluster, self.resolver.speed_limit,
+                    self.resolver.speed_limit_final_last, has_speed_limit, self.resolver.distance, self.events_sp)
 
     targets = {
       LongitudinalPlanSource.cruise: (v_cruise, a_ego),
@@ -140,8 +151,9 @@ class LongitudinalPlannerSP:
     a_mpc = get_accel_from_plan(self.v_desired_trajectory, self.a_desired_trajectory, CONTROL_N_T_IDX,
                                 action_t=self.CP.longitudinalActuatorDelay + DT_MDL)
     # a_cruise is last frame's: the host builds this frame's after the e2e candidate
-    return self.e2e_lead_gap.update(sm, a_e2e, float(a_mpc), is_e2e, reset_state, dec_active, self.allow_throttle, self.fcw,
-                                    self.a_cruise, steer_lat_accel)
+    self.a_e2e = self.e2e_lead_gap.update(sm, a_e2e, float(a_mpc), is_e2e, reset_state, dec_active, self.allow_throttle,
+                                          self.fcw, self.a_cruise, steer_lat_accel)
+    return self.a_e2e
 
   def update(self, sm: messaging.SubMaster) -> None:
     self.events_sp.clear()
@@ -150,6 +162,9 @@ class LongitudinalPlannerSP:
     self.e2e_alerts_helper.update(sm, self.events_sp)
 
   def publish_longitudinal_plan_sp(self, sm: messaging.SubMaster, pm: messaging.PubMaster) -> None:
+    # the host has chosen: tell the set-speed floor how much of the lift reached the car
+    self.e2e_set_speed.delivered(float(self.output_a_target), float(self.a_e2e))
+
     plan_sp_send = messaging.new_message('longitudinalPlanSP')
 
     plan_sp_send.valid = sm.all_checks(service_list=['carState', 'controlsState'])
@@ -177,8 +192,6 @@ class LongitudinalPlannerSP:
     sccVision.maxPredictedLateralAccel = float(self.scc.vision.max_pred_lat_acc)
     sccVision.enabled = self.scc.vision.is_enabled
     sccVision.active = self.scc.vision.is_active
-    # zoompilot's planner only; 0 tells the ICBM servo there is no lookahead
-    sccVision.vAheadMin = float(getattr(self.scc.vision, 'v_ahead_min', 0.))
     # Map Control
     sccMap = smartCruiseControl.map
     sccMap.state = self.scc.map.state
@@ -211,31 +224,12 @@ class LongitudinalPlannerSP:
     e2eAlerts.greenLightAlert = self.e2e_alerts_helper.green_light_alert
     e2eAlerts.leadDepartAlert = self.e2e_alerts_helper.lead_depart_alert
 
-    # zoompilot: experimental mode's set-speed floor
-    e2eSetSpeed = longitudinalPlanSP.zoompilot.e2eSetSpeed
-    e2eSetSpeed.authority = float(self.e2e_set_speed.authority)
-    e2eSetSpeed.gain = float(self.e2e_set_speed.gain)
-    e2eSetSpeed.floor = float(self.e2e_set_speed.floor)
-    e2eSetSpeed.boost = float(self.e2e_set_speed.boost)
-    e2eSetSpeed.inhibit = self.e2e_set_speed.inhibit
-
-    # zoompilot: experimental mode's follow-distance assist
-    e2eLeadGap = longitudinalPlanSP.zoompilot.e2eLeadGap
-    e2eLeadGap.authority = float(self.e2e_lead_gap.authority)
-    e2eLeadGap.gain = float(self.e2e_lead_gap.gain)
-    e2eLeadGap.weight = float(self.e2e_lead_gap.weight)
-    e2eLeadGap.gapExcess = float(self.e2e_lead_gap.gap_excess)
-    e2eLeadGap.boost = float(self.e2e_lead_gap.boost)
-    e2eLeadGap.inhibit = self.e2e_lead_gap.inhibit
-
-    # zoompilot: the model's lead forecast in the MPC
-    leadForecast = longitudinalPlanSP.zoompilot.leadForecast
-    for report, weight, inhibit, lead_xv in zip((leadForecast.leadOne, leadForecast.leadTwo), self.lead_forecast.weights,
-                                                self.lead_forecast.inhibits, self.lead_forecast.lead_xv, strict=True):
-      report.weight = float(weight)
-      report.inhibit = inhibit
-      if lead_xv is not None:
-        report.x = lead_xv[:, 0].tolist()
-        report.v = lead_xv[:, 1].tolist()
+    # zoompilot: experimental mode's set-speed floor and follow-distance assist, the model's lead forecast
+    zoompilot = longitudinalPlanSP.zoompilot
+    self.e2e_set_speed.fill(zoompilot.e2eSetSpeed)
+    self.e2e_lead_gap.fill(zoompilot.e2eLeadGap)
+    self.lead_forecast.fill(zoompilot.leadForecast)
+    # zoompilot's vision planner only; 0 tells the ICBM servo there is no lookahead
+    zoompilot.sccVAheadMin = float(getattr(self.scc.vision, 'v_ahead_min', 0.))
 
     pm.send('longitudinalPlanSP', plan_sp_send)

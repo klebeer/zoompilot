@@ -1,56 +1,78 @@
-zoompilot vUNRELEASED
+zoompilot v2026.10.16-16
 ========================
-**jetlink support!**
-* Run big models on a Mac, Jetson, Linux PC, iPhone/iPad or Android <3
-* Settings > Models > Jetlink.
-* The big model is offered only once the link has kept up for a second with the small model driving, so a slow or cold link never costs a take-over.
-* A dropped link says **Big Model Lost**, not TAKE CONTROL: the small model drives on.
+* Fixes bugs
+  * Fixes "sunnypilot unavailable" for AUS/NZ Mazdas.
+  * comma 3X: plugging a laptop in for jetlink no longer reboots the comma.
 
-**Mazda steering**
-* Better torque learning at every speed.
-* Torque bar changes colour before the steering limit alert.
-* Older Mazdas (incl. 2012-16 CX-5) steer without an EPS swap, above 45 kph. Untested, feedback welcome.
-* Dash "hands on wheel" warning matches zoompilot's.
-* 2022 CX-5: better default tune up to 63 mph.
-
-**Other torque cars**
-* Toyota, Hyundai, Honda, Rivian and VW learn their steering at every speed too.
-* The Speed Dependent setting is gone: it is always on with self-tune.
-
-**Curve speed (Mazda)**
-* Smart Cruise is now Slow for Curves: Vision and Map.
-* Decel Overshoot replaced by a Mazda tune: less hard braking for highway curves.
-* Smoother curve slowdowns.
-* A speed limit prompt no longer stalls a curve slowdown.
-* Speed comes back sooner in and after long curves.
-
-**Fixes**
-* **Lane Keep Off:** dash button turns off steering, keeps cruise. Steering resumes when it's back on.
-* **False alert:** no "Steering Assist Temporarily Unavailable" with lane keep off.
-* **Export Mazdas:** CX-5 and CX-9 JM7 VINs recognised.
-* **NZ & AUS:** set speed matches the dash.
-* **Speed limit alerts:** show the speed, only when it changes.
-* **Wheel cancel:** no longer turns cruise main off.
-* **Sunnylink:** backup/restore fixed.
-* **sunnypilot:** model refresh buttons, Models menu freeze and camera offset fixed.
-
-**TJA button Mazdas**
-* Steering stays on after a TJA press.
-* TJA no longer leaves MRCC armed.
-* White wheel icon when steering with cruise off.
-* Cruise and TJA chimes restored.
-
-**Alpha longitudinal**
-* Alpha long, Experimental Mode and DEC are now under Cruise.
-* Remembers your cruise settings when you turn alpha long or ICBM off and on.
-* New: Experimental Mode Speed Assist, off by default. Experimental runs ~5 mph under set speed; this brings it up when the road is clear.
-* New: Experimental Mode Lead Follow Assist, off by default. Experimental follows further back than your following distance; this closes up to it behind a steady car, never closer than chill would.
-* Starts braking sooner for a slowing car ahead, using the driving model's forecast of where that car will be. Based on [openpilot #37824](https://github.com/commaai/openpilot/pull/37824).
-* Speed limits: ICBM on changes the set speed. ICBM off asks you to set 80 mph, then handles the limit.
-* Auto high beams fixed.
-* Both distance buttons change personality.
-* CX-9 and other Mazdas without Auto Hold: alpha long fixed, stops release and resume again.
-* No creeping at a red light after stopping.
+zoompilot v2026.10.15-15
+========================
+* jetlink support <3
+* Cruise
+  * The ICBM toggle is no longer needed. ICBM turns on when a feature needs it.
+  * Smart Cruise is renamed to Slow for Curves: Vision and Map.
+  * Alpha long, Experimental Mode and DEC are now under Cruise.
+  * Speed limit assist shows the new speed in the confirmation.
+  * Slow for Curves further tuned for Mazda.
+* Steering
+  * Speed Dependent toggle removed. It is always enabled when self-tune is on.
+  * Separate tunes for small and big models.
+  * Fixed Lane Change Smoothing.
+  * Fixed torque bar not showing amber before steering limit reached (Mazda).
+* Startup
+  * "Driving Model Loading" shows instead of communication alerts.
+  * Fewer Controls Mismatch alerts.
+  * comma 3X: a slow boot no longer blocks engaging for the whole drive.
+  * Fixed a rare frozen screen at startup.
+  * New zoompilot boot logo.
+* comma 4
+  * Long-press a setting for help.
+  * A toggle another setting overrides shows a grey pill.
+  * Software says when an update is ready to install.
+  * Manage eSIM profiles under Network.
+* Mazda
+  * Decel Overshoot is gone. Highway curves no longer brake too hard or too early.
+  * Smoother curve slowdowns, and your speed comes back sooner.
+  * A speed limit prompt no longer stalls a curve slowdown.
+  * Reads the speed limit from the nav unit when the camera sees none.
+  * Pressing ON in cruise standby turns steering back on.
+  * 2022 CX-5: improved steering tune.
+  * 2022 CX-5: steering starts from learned values.
+  * Older Mazdas, 2012-16 CX-5 included, steer on the stock EPS above 45 kph. Untested, feedback welcome.
+* Alpha longitudinal
+  * Brakes sooner for a slowing car (openpilot #37824).
+  * New, off by default: Experimental Mode Speed Assist. Gets closer to your set speed on a clear road, eases off for curves.
+  * New, off by default: Experimental Mode Lead Follow Assist. Holds your following distance, never closer than chill.
+  * Reduced creeping at a red light.
+  * CX-9 and other Mazdas without Auto Hold: stops release and resume again.
+  * Both distance buttons change personality.
+  * Fixed auto high beams when using alpha long.
+  * Steadier lead car icon on the dash.
+  * "Remain parked" shows right away at startup.
+  * Cruise settings are kept when you turn alpha long or ICBM off and on.
+  * Speed limits: ICBM changes your set speed. Without ICBM, you are asked to set 80 mph.
+* TJA button Mazdas
+  * Steering stays on after a TJA press.
+  * TJA no longer leaves MRCC armed.
+  * White wheel on the cluster when steering with cruise off.
+  * Restored the cruise and TJA chimes.
+* Other cars
+  * Toyota, Hyundai, Honda, Rivian and VW learn steering at every speed.
+  * Rivian, Tesla: main cruise engages steering again.
+  * No "Steering Blocked by Panda Safety" when you re-engage.
+  * Chrysler CUSW: no ICBM, the car only accepts cancel and resume.
+* Fixes
+  * Lane Keep off pauses steering and keeps cruise, with a "Lateral Disabled" alert.
+  * No false "Steering Assist Temporarily Unavailable".
+  * Turning cruise main off at a stop, on the brake, reliably turns steering off.
+  * Pressing cancel on the wheel no longer switches cruise off. RES resumes as normal.
+  * Export CX-5 and CX-9 (JM7 VINs) are recognised.
+  * NZ/AUS: set speed matches the dash.
+  * Fixed sunnylink backup and restore.
+  * Alpha long is read-only on sunnylink web.
+  * No false Posenet or locationd alerts while the model is not running.
+* Upstream
+  * sunnypilot: model refresh and clear cache buttons, Models menu freeze and camera offset fixed.
+  * openpilot: new alert icons, steering picks up the current curve when it engages.
 
 zoompilot v2026.09.12-14
 ========================
