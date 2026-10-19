@@ -15,11 +15,13 @@ import os
 import time
 from datetime import UTC, datetime
 
+import numpy as np
+
 import openpilot.cereal.messaging as messaging
 from openpilot.common.hardware import PC
 from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
-from openpilot.sunnypilot.mapd import route_desire_live
+from openpilot.sunnypilot.mapd import route_desire_live, route_input
 from openpilot.sunnypilot.mapd.curve_warning import LOOKAHEAD_M, distance_m
 from openpilot.sunnypilot.mapd.nav_messages import NavPublisher
 from openpilot.sunnypilot.mapd.reroute import Rerouter
@@ -110,6 +112,19 @@ class Guide:
     self.latch = route_desire_live.Latch() if live else None
     self.publisher = route_desire_live.Publisher() if live else None
     self.rerouter = rerouter
+    self._shape_id: str | None = None
+    self._shape = None
+
+  def route_points(self, lat: float, lon: float, heading: float):
+    """route_input's points on the route the follower follows, or None while it follows none."""
+    if self.follower is None or self.nav is None or self.nav["state"] != "following":
+      return None
+    route = next((t.route for t in self.follower.trackers if t.route.route_id == self.nav["route_id"]), None)
+    if route is None:
+      return None
+    if self._shape_id != route.route_id:
+      self._shape_id, self._shape = route.route_id, np.array(route.shape, dtype=np.float64)
+    return route_input.points_ahead(self._shape, lat, lon, heading)
 
   def _reload(self, now: float) -> dict | None:
     """A record when the bundle file changed, after building a follower for it. Looks at it at most every FILE_CHECK_S."""
@@ -187,6 +202,9 @@ def main() -> None:
                            None if left == right else "left" if left else "right", sm["carControl"].latActive)
       if nav_pub is not None:
         nav_pub.step(now, guide.nav, guide.follower)
+      route_input.publish(route_input.encode(guide.route_points(loc.positionGeodetic.value[0], loc.positionGeodetic.value[1],
+                                                                math.degrees(loc.calibratedOrientationNED.value[2]))),
+                          time.monotonic_ns())
       if records:
         if out is None:
           os.makedirs(LOG_DIR, exist_ok=True)

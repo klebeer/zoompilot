@@ -44,6 +44,7 @@ from openpilot.sunnypilot.modeld_v2.constants import ModelConstants, Plan
 from openpilot.sunnypilot.modeld_v2.meta_helper import load_meta_constants
 from openpilot.sunnypilot.modeld_v2.camera_offset_helper import CameraOffsetHelper
 from openpilot.sunnypilot.modeld_v2.context_offset import ContextOffset
+from openpilot.sunnypilot.mapd import route_input
 from openpilot.sunnypilot.livedelay.helpers import get_lat_delay
 from openpilot.sunnypilot.modeld_v2.modeld_base import ModelStateBase
 from openpilot.sunnypilot.modeld_v2.helpers import load_oob
@@ -188,7 +189,7 @@ class ModelState(ModelStateBase):
       np.where(inputs[desire_key] - self.prev_desire > .99, inputs[desire_key], 0)
     self.prev_desire[:] = inputs[desire_key]
 
-    for key in ('traffic_convention', 'lateral_control_params', 'action_t'):
+    for key in ('traffic_convention', 'lateral_control_params', 'action_t', 'route_input'):
       if key in self.numpy_inputs and key in inputs:
         self.numpy_inputs[key][:] = inputs[key]
 
@@ -470,6 +471,8 @@ def main(demo=False):
 
     if 'lateral_control_params' in model.numpy_inputs:
       inputs['lateral_control_params'] = np.array([v_ego, lat_delay], dtype=np.float32)
+    if 'route_input' in model.numpy_inputs:
+      inputs['route_input'] = route_input.read(time.monotonic_ns())
 
     model.frame_drop_ratio = frame_drop_ratio
     mt1 = time.perf_counter()
