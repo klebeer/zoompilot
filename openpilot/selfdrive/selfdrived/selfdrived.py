@@ -29,11 +29,11 @@ from openpilot.common.hardware import HARDWARE
 from openpilot.sunnypilot.mads.mads import ModularAssistiveDrivingSystem
 from openpilot.sunnypilot import get_sanitize_int_param
 from openpilot.sunnypilot.selfdrive.car.car_specific import CarSpecificEventsSP
-from openpilot.sunnypilot.selfdrive.car.cruise_helpers import CruiseHelper
 from openpilot.sunnypilot.selfdrive.car.intelligent_cruise_button_management.controller import IntelligentCruiseButtonManagement
 from openpilot.sunnypilot.selfdrive.selfdrived.button_state_tracker import ButtonStateTracker
 from openpilot.sunnypilot.selfdrive.selfdrived.events import EventsSP
 from openpilot.sunnypilot.selfdrive.selfdrived.model_events import ModelEventsSP
+from openpilot.sunnypilot.selfdrive.selfdrived.selfdrived_zp import SelfdrivedZP
 
 REPLAY = "REPLAY" in os.environ
 SIMULATION = "SIMULATION" in os.environ
@@ -56,7 +56,7 @@ TurnDirection = custom.ModelDataV2SP.TurnDirection
 IGNORED_SAFETY_MODES = (SafetyModel.silent, SafetyModel.noOutput)
 
 
-class SelfdriveD(CruiseHelper):
+class SelfdriveD:
   def __init__(self, CP=None, CP_SP=None):
     self.params = Params()
 
@@ -118,14 +118,13 @@ class SelfdriveD(CruiseHelper):
     self.is_metric = self.params.get_bool("IsMetric")
     self.is_ldw_enabled = self.params.get_bool("IsLdwEnabled")
     self.disengage_on_accelerator = self.params.get_bool("DisengageOnAccelerator")
+    openpilot_enabled = self.params.get_bool("OpenpilotEnabledToggle")
 
     car_recognized = self.CP.brand != 'mock'
 
     # cleanup old params
     if not self.CP.alphaLongitudinalAvailable:
       self.params.remove("AlphaLongitudinalEnabled")
-    if not self.CP.openpilotLongitudinalControl:
-      self.params.remove("ExperimentalMode")
 
     self.CS_prev = car.CarState.new_message()
     self.AM = AlertManager()
@@ -142,7 +141,6 @@ class SelfdriveD(CruiseHelper):
     self.events_prev = []
     self.logged_comm_issue = None
     self.not_running_prev = None
-    self.experimental_mode = False
     self.personality = get_sanitize_int_param(
       "LongitudinalPersonality",
       min(log.LongitudinalPersonality.schema.enumerants.values()),
@@ -150,6 +148,7 @@ class SelfdriveD(CruiseHelper):
       self.params
     )
     self.recalibrating_seen = False
+    self.startup_cruise_checked = False
     self.dm_lockout_set = False
     self.dm_uncertain_alerted = False
     self.state_machine = StateMachine()
@@ -171,9 +170,9 @@ class SelfdriveD(CruiseHelper):
     elif self.CP.secOcRequired and not self.CP.secOcKeyAvailable:
       self.startup_event = EventName.startupNoSecOcKey
 
-    if not car_recognized:
+    set_offroad_alert("Offroad_CarUnrecognized", not car_recognized)
+    if not car_recognized and openpilot_enabled:
       self.events.add(EventName.carUnrecognized, static=True)
-      set_offroad_alert("Offroad_CarUnrecognized", True)
     elif self.CP.passive:
       self.events.add(EventName.dashcamMode, static=True)
 
@@ -185,8 +184,8 @@ class SelfdriveD(CruiseHelper):
 
     self.car_events_sp = CarSpecificEventsSP(self.CP, self.CP_SP)
 
-    CruiseHelper.__init__(self, self.CP)
     self.button_state_tracker = ButtonStateTracker()
+    self.selfdrived_zp = SelfdrivedZP(self.CP, self.params)
 
   def update_events(self, CS):
     """Compute onroadEvents from carState"""
@@ -303,6 +302,12 @@ class SelfdriveD(CruiseHelper):
         (CS.brakePressed and (not self.CS_prev.brakePressed or not CS.standstill)) or \
         (CS.regenBraking and (not self.CS_prev.regenBraking or not CS.standstill)):
         self.events.add(EventName.pedalPressed)
+
+      # Audible alert when stock cruise was already on at startup, since openpilot will cancel it
+      if not self.startup_cruise_checked:
+        self.startup_cruise_checked = True
+        if CS.cruiseState.enabled and not self.events.contains(ET.ENABLE) and not REPLAY:
+          self.events.add(EventName.startupCruiseCanceled)
 
     # Create events for temperature, disk space, and memory
     if self.sm['deviceState'].thermalStatus >= ThermalStatus.overheated:
@@ -464,14 +469,12 @@ class SelfdriveD(CruiseHelper):
       self.logged_comm_issue = None
 
     if not self.CP.notCar and not big_model_settling:  # localization has nothing to work with during the load
-      # a message never received is capnp defaults, not a localizer verdict: locationd and paramsd
-      # publish nothing while modeld is down, and processNotRunning already says so
+      # the defaults of a message that was never received are not a localizer failure
       if self.sm.seen['deviceMotion'] and not self.sm['deviceMotion'].posenetOK:
         self.events.add(EventName.posenetInvalid)
       if self.sm.seen['deviceMotion'] and not self.sm['deviceMotion'].inputsOK:
         self.events.add(EventName.locationdTemporaryError)
-      if (self.sm.seen['vehicleParameters'] and not self.sm['vehicleParameters'].valid and
-          cal_status == log.ExtrinsicsCalibration.Status.calibrated and
+      if (self.sm.seen['vehicleParameters'] and not self.sm['vehicleParameters'].valid and cal_status == log.ExtrinsicsCalibration.Status.calibrated and
           not TESTING_CLOSET and (not SIMULATION or REPLAY)):
         self.events.add(EventName.paramsdTemporaryError)
 
@@ -526,16 +529,14 @@ class SelfdriveD(CruiseHelper):
     if CS.gearShifter == car.CarState.GearShifter.park and self.mads.enabled:
       self.events.remove(EventName.canBusMissing)
 
-    CruiseHelper.update(self, CS, self.events_sp, self.experimental_mode)
+    self.personality = self.selfdrived_zp.update(CS, self.sm['carStateSP'], self.events, self.events_sp, self.icbm, self.personality)
 
-    # decrement personality on distance button press
+    # Decrement personality on distance button press
     if self.CP.openpilotLongitudinalControl:
-      if any(not be.pressed and be.type == ButtonType.gapAdjustCruise for be in CS.buttonEvents):
-        if not self.experimental_mode_switched:
-          self.personality = (self.personality - 1) % 3
-          self.params.put('LongitudinalPersonality', self.personality)
-          self.events.add(EventName.personalityChanged)
-        self.experimental_mode_switched = False
+      if any(not be.pressed and be.type == ButtonType.gapAdjustCruise for be in CS.buttonEvents) and self.selfdrived_zp.gap_release_steps:
+        self.personality = (self.personality - 1) % 3
+        self.params.put('LongitudinalPersonality', self.personality)
+        self.events.add(EventName.personalityChanged)
 
     self.icbm.run(CS, self.sm['carControl'], self.sm['longitudinalPlanSP'], self.is_metric)
 
@@ -612,7 +613,6 @@ class SelfdriveD(CruiseHelper):
     ss.active = self.active
     ss.state = self.state_machine.state
     ss.engageable = not self.events.contains(ET.NO_ENTRY)
-    ss.experimentalMode = self.experimental_mode
     ss.personality = self.personality
 
     ss.alertText1 = self.AM.current_alert.alert_text_1
@@ -682,7 +682,6 @@ class SelfdriveD(CruiseHelper):
       self.is_metric = self.params.get_bool("IsMetric")
       self.is_ldw_enabled = self.params.get_bool("IsLdwEnabled")
       self.disengage_on_accelerator = self.params.get_bool("DisengageOnAccelerator")
-      self.experimental_mode = self.params.get_bool("ExperimentalMode") and self.CP.openpilotLongitudinalControl
       self.personality = self.params.get("LongitudinalPersonality", return_default=True)
 
       self.mads.read_params()

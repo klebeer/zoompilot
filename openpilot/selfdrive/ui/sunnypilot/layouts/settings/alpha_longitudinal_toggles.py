@@ -5,10 +5,9 @@ This file is part of zoompilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 
 The alpha switch and the modes that run on openpilot longitudinal control, at the top of the tizi
-Cruise panel. Toggles and Developer drop their copies of the first two (TogglesLayoutSP,
-DeveloperLayoutSP) so each switch appears once.
+Cruise panel. Developer drops its copy of the alpha switch (DeveloperLayoutSP) so it appears once.
 """
-from openpilot.selfdrive.ui.layouts.settings.developer import DESCRIPTIONS as DEVELOPER_DESCRIPTIONS
+from openpilot.selfdrive.ui.sunnypilot.longitudinal_mode import longitudinal_reachable
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.lib.multilang import tr, tr_noop
@@ -16,17 +15,13 @@ from openpilot.system.ui.sunnypilot.widgets.list_view import toggle_item_sp
 from openpilot.system.ui.widgets import DialogResult
 from openpilot.system.ui.widgets.confirm_dialog import ConfirmDialog
 
-# upstream's Toggles text (layouts/settings/toggles.py) with our name, shown again in the confirm dialog
-EXPERIMENTAL_MODE_DESCRIPTION = tr_noop(
-  "zoompilot defaults to driving in chill mode. Experimental mode enables alpha-level features that aren't ready for chill mode. " +
-  "Experimental features are listed below:<br>" +
-  "<h4>End-to-End Longitudinal Control</h4><br>" +
-  "Let the driving model control the gas and brakes. zoompilot will drive as it thinks a human would, including stopping for red lights and stop signs. " +
-  "Since the driving model decides the speed to drive, the set speed will only act as an upper bound. This is an alpha quality feature; " +
-  "mistakes should be expected.<br>" +
-  "<h4>New Driving Visualization</h4><br>" +
-  "The driving visualization will transition to the road-facing wide-angle camera at low speeds to better show some turns. " +
-  "The Experimental mode logo will also be shown in the top right corner."
+# upstream's warning (developer.py), with our name; its advice to turn on experimental mode is moot
+# now the driving model drives the gas and brakes by default
+ALPHA_LONGITUDINAL_DESCRIPTION = tr_noop(
+  "<b>WARNING: zoompilot longitudinal control is in alpha for this car and may disable Automatic Emergency Braking (AEB).</b><br><br>" +
+  "On this car, zoompilot defaults to the car's built-in ACC instead of zoompilot's longitudinal control. " +
+  "Enable this to switch to zoompilot longitudinal control. " +
+  "Changing this setting will restart zoompilot if the car is powered on."
 )
 
 
@@ -35,39 +30,20 @@ class AlphaLongitudinalToggles:
   def __init__(self):
     self._alpha_long_toggle = toggle_item_sp(
       title=lambda: tr("Alpha Longitudinal"),
-      description=lambda: tr(DEVELOPER_DESCRIPTIONS["alpha_longitudinal"]),
+      description=lambda: tr(ALPHA_LONGITUDINAL_DESCRIPTION),
       callback=self._on_alpha_long,
-      enabled=ui_state.is_offroad)
-
-    self._experimental_toggle = toggle_item_sp(
-      title=lambda: tr("Experimental Mode"),
-      description=lambda: tr(EXPERIMENTAL_MODE_DESCRIPTION),
-      callback=self._on_experimental_mode)
-
-    self._dec_toggle = toggle_item_sp(
-      title=lambda: tr("Dynamic Experimental Control"),
-      description=lambda: tr("Switches between chill and Experimental Mode on its own: " +
-                             "experimental for stops and slowdowns ahead, chill otherwise."),
-      param="DynamicExperimentalControl")
+      enabled=lambda: not ui_state.engaged)
 
     self._set_speed_toggle = toggle_item_sp(
-      title=lambda: tr("Experimental Mode Speed Assist"),
-      description=lambda: tr("In Experimental Mode, gently raise speed toward the set speed when nothing calls for slowing down. " +
-                             "Has no effect while Dynamic Experimental Control is on."),
+      title=lambda: tr("Set Speed Assist"),
+      description=lambda: tr("Drive toward your set speed and following distance whenever the driving model " +
+                             "holds back. The model still makes every slowdown. The onroad button and a long press " +
+                             "of the distance button switch it too."),
       param="ExperimentalModeSetSpeed")
-
-    self._lead_gap_toggle = toggle_item_sp(
-      title=lambda: tr("Experimental Mode Lead Follow Assist"),
-      description=lambda: tr("Closes the gap to your driving personality's following distance behind a steady car. " +
-                             "Never closer than chill mode. No effect while Dynamic Experimental Control is on."),
-      param="ExperimentalModeLeadGap")
 
     self._refresh_toggles = (
       ("AlphaLongitudinalEnabled", self._alpha_long_toggle),
-      ("ExperimentalMode", self._experimental_toggle),
       ("ExperimentalModeSetSpeed", self._set_speed_toggle),
-      ("ExperimentalModeLeadGap", self._lead_gap_toggle),
-      ("DynamicExperimentalControl", self._dec_toggle),
     )
     self.items = [item for _, item in self._refresh_toggles]
 
@@ -78,12 +54,9 @@ class AlphaLongitudinalToggles:
     CP = ui_state.CP
     has_long = CP is not None and ui_state.has_longitudinal_control
     self._alpha_long_toggle.set_visible(CP is not None and CP.alphaLongitudinalAvailable)
-    self._experimental_toggle.action_item.set_enabled(CP is None or has_long)
-    self._dec_toggle.action_item.set_enabled(has_long)
-    # DEC decides the mode on its own, and the e2e assists never act under it
-    dec = self._dec_toggle.action_item.get_state()
-    self._set_speed_toggle.action_item.set_enabled(has_long and not dec)
-    self._lead_gap_toggle.action_item.set_enabled(has_long and not dec)
+    self._set_speed_toggle.set_visible(longitudinal_reachable(ui_state))
+    # alpha off: locked, keeping its value
+    self._set_speed_toggle.action_item.set_enabled(has_long)
 
   def refresh(self):
     for key, item in self._refresh_toggles:
@@ -96,29 +69,13 @@ class AlphaLongitudinalToggles:
 
   def _on_alpha_long(self, state: bool):
     if not state:
-      ui_state.params.put_bool("AlphaLongitudinalEnabled", False, block=True)
+      ui_state.set_alpha_longitudinal(False)
       return
 
     def on_result(result: DialogResult):
       if result == DialogResult.CONFIRM:
-        # param only: card watches for the change and requests the onroad cycle itself, after
-        # any radar hand-back the brand needs
-        ui_state.params.put_bool("AlphaLongitudinalEnabled", True, block=True)
+        ui_state.set_alpha_longitudinal(True)
       else:
         self._alpha_long_toggle.action_item.set_state(False)
 
     self._confirm(self._alpha_long_toggle, on_result)
-
-  def _on_experimental_mode(self, state: bool):
-    if not state or ui_state.params.get_bool("ExperimentalModeConfirmed"):
-      ui_state.params.put_bool("ExperimentalMode", state, block=True)
-      return
-
-    def on_result(result: DialogResult):
-      if result == DialogResult.CONFIRM:
-        ui_state.params.put_bool("ExperimentalMode", True, block=True)
-        ui_state.params.put_bool("ExperimentalModeConfirmed", True, block=True)
-      else:
-        self._experimental_toggle.action_item.set_state(False)
-
-    self._confirm(self._experimental_toggle, on_result)

@@ -4,16 +4,21 @@ Copyright (c) 2026-, Zeph Leggett.
 This file is part of zoompilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 """
-import pyray as rl
+import raylib_nb as rl
 from collections.abc import Callable
 
+from openpilot.system.ui.sunnypilot.lib.switch import SWITCH_VALUE, Switch, reads_switched, write_switch
 
-def read_scaled_param(params, param: str, float_param: bool, min_value: int) -> int:
+
+def read_scaled_param(params, param: str, float_param: bool, min_value: int, switch: Switch | None = None) -> int:
   """Read a param in the picker's integer domain.
 
   Float params use the TICI control's x100 scaling. Rounding prevents binary float
   representation from reducing the value on each open and commit cycle.
+  A switch that reads its `at` state reads as SWITCH_VALUE.
   """
+  if reads_switched(params, switch):
+    return SWITCH_VALUE
   val = params.get(param, return_default=True)
   try:
     return round(float(val) * (100 if float_param else 1)) if val is not None else min_value
@@ -144,45 +149,16 @@ class PickerItem(Widget):
       rl.draw_text_ex(font, self.display_label, rl.Vector2(text_x, text_y), font_size, 0, color)
 
 
-def _build_band_texture():
-  """Build a two-pixel vertical gradient strip for a selection-band edge."""
-  band_h = CAROUSEL_HEIGHT - 14 * 2
-  fade = min(BAND_FADE_LEN, band_h // 3)
-  img = rl.gen_image_color(2, band_h, rl.Color(0, 0, 0, 0))
-  for y in range(band_h):
-    if y < fade:
-      a = int(BAND_COLOR.a * y / fade)
-    elif y >= band_h - fade:
-      a = int(BAND_COLOR.a * (band_h - 1 - y) / fade)
-    else:
-      a = BAND_COLOR.a
-    c = rl.Color(BAND_COLOR.r, BAND_COLOR.g, BAND_COLOR.b, a)
-    rl.image_draw_rectangle(img, 0, y, 2, 1, c)
-  tex = rl.load_texture_from_image(img)
-  rl.unload_image(img)
-  return tex
-
-
-# Texture creation requires an active OpenGL context.
-_band_texture = None
-
-
-def _get_band_texture():
-  global _band_texture
-  if _band_texture is None:
-    _band_texture = _build_band_texture()
-  return _band_texture
-
-
 class NumberPickerScreen(Widget):
   """Full picker sub-screen with title and horizontal snap-scrolling carousel."""
 
   def __init__(self, title: str, param: str, min_value: int, max_value: int,
                step: int = 1, label_callback: Callable | None = None,
                value_map: dict[int, int] | None = None, float_param: bool = False,
-               unit: str | Callable[[], str] = "", item_width: int = ITEM_WIDTH):
+               unit: str | Callable[[], str] = "", item_width: int = ITEM_WIDTH, switch: Switch | None = None):
     super().__init__()
     self._title = title
+    self._switch = switch
     self._param = param
     self._min_value = min_value
     self._float_param = float_param
@@ -194,6 +170,8 @@ class NumberPickerScreen(Widget):
     self._was_settled = True
 
     self._picker_items: list[PickerItem] = []
+    if switch is not None:
+      self._picker_items.append(PickerItem(SWITCH_VALUE, switch.label, on_tap=self._on_item_tap, item_width=item_width))
     val = min_value
     while val <= max_value:
       display_val = value_map[val] if value_map and val in value_map else val
@@ -243,16 +221,15 @@ class NumberPickerScreen(Widget):
         break
 
   def _read_value(self) -> int:
-    return read_scaled_param(self._params, self._param, self._float_param, self._min_value)
+    return read_scaled_param(self._params, self._param, self._float_param, self._min_value, self._switch)
 
   def show_event(self):
     super().show_event()  # propagates to _scroller via _child()
     current = self._read_value()
     self._last_center_value = current
-    for idx, item in enumerate(self._picker_items):
-      if item.raw_value == current:
-        self._scroll_to_index(idx)
-        break
+    # the nearest item: a value set elsewhere (tici, sunnylink, the other units) can sit off this grid
+    if self._picker_items:
+      self._scroll_to_index(min(range(len(self._picker_items)), key=lambda i: abs(self._picker_items[i].raw_value - current)))
 
   def _commit_value(self):
     """Write the current center item's value to params."""
@@ -262,7 +239,9 @@ class NumberPickerScreen(Widget):
     if center.raw_value != self._last_center_value:
       self._last_center_value = center.raw_value
       # Params.put is non-blocking by default.
-      self._params.put(self._param, center.raw_value / 100.0 if self._float_param else center.raw_value)
+      if center.raw_value != SWITCH_VALUE:
+        self._params.put(self._param, center.raw_value / 100.0 if self._float_param else center.raw_value)
+      write_switch(self._params, self._switch, center.raw_value)
 
   def _update_state(self):
     super()._update_state()
@@ -291,11 +270,16 @@ class NumberPickerScreen(Widget):
       except ValueError:
         unit_text = ""
 
-    band_tex = _get_band_texture()
     band_left = rect.x + (SCREEN_WIDTH - self._item_width) / 2 - 1
     band_right = band_left + self._item_width
-    for x in (band_left, band_right):
-      rl.draw_texture_ex(band_tex, (x, rect.y + BAND_TOP), 0, 1.0, rl.WHITE)
+    band_h = CAROUSEL_HEIGHT - 14 * 2
+    fade = min(BAND_FADE_LEN, band_h // 3)
+    clear = rl.Color(BAND_COLOR.r, BAND_COLOR.g, BAND_COLOR.b, 0)
+    for x in (int(band_left), int(band_right)):
+      y = int(rect.y + BAND_TOP)
+      rl.draw_rectangle_gradient_v(x, y, 2, fade, clear, BAND_COLOR)
+      rl.draw_rectangle(x, y + fade, 2, band_h - 2 * fade, BAND_COLOR)
+      rl.draw_rectangle_gradient_v(x, y + band_h - fade, 2, fade, BAND_COLOR, clear)
 
     if unit_text:
       unit_font = gui_app.font(FontWeight.BOLD)

@@ -7,8 +7,11 @@ See the LICENSE.md file in the root directory for more details.
 """
 
 from collections.abc import Callable
+import gc
 import os
 os.environ['GMMU'] = '0'
+os.environ.setdefault('AM_POWER_LIMIT', '100')
+os.environ.setdefault('AM_PERF_LEVEL', 'high')
 from openpilot.common.hardware import COMMA_HARDWARE
 from openpilot.selfdrive.modeld.helpers import chestnut_present
 CHESTNUT_PRESENT = chestnut_present()
@@ -16,19 +19,21 @@ CHESTNUT_PRESENT = chestnut_present()
 # on a comma 4. Without a chestnut that is QCOM, so name it; tinygrad reads DEV once, at import
 if COMMA_HARDWARE and not CHESTNUT_PRESENT:
   os.environ.setdefault('DEV', 'QCOM')
+from tinygrad.device import Device
 import numpy as np
 import threading
 import time
 from setproctitle import setproctitle
 
 import openpilot.cereal.messaging as messaging
+from openpilot.selfdrive.modeld.helpers import wait_for_chestnut
 from openpilot.cereal import log
 from opendbc.car.structs import car
 from openpilot.cereal.services import SERVICE_LIST
 from openpilot.cereal.messaging import PubMaster, SubMaster
 from openpilot.cereal.visionipc import VisionStreamType
 from msgq.visionipc import VisionIpcClient, VisionBuf
-from openpilot.common.file_chunker import open_file_chunked
+from opendbc.car.car_helpers import get_demo_car_params
 from openpilot.common.swaglog import cloudlog
 from openpilot.common.params import Params
 from openpilot.common.filter_simple import FirstOrderFilter
@@ -42,12 +47,12 @@ from openpilot.sunnypilot.modeld_v2.fill_model_msg import fill_model_msg, fill_p
 from openpilot.sunnypilot.modeld_v2.parse_model_outputs import Parser
 from openpilot.sunnypilot.modeld_v2.constants import ModelConstants, Plan
 from openpilot.sunnypilot.modeld_v2.meta_helper import load_meta_constants
-from openpilot.sunnypilot.modeld_v2.camera_offset_helper import CameraOffsetHelper
+from openpilot.sunnypilot.modeld_v2.model_settings import ModelSettings
 from openpilot.sunnypilot.modeld_v2.context_offset import ContextOffset
 from openpilot.sunnypilot.mapd import route_input
-from openpilot.sunnypilot.livedelay.helpers import get_lat_delay
 from openpilot.sunnypilot.modeld_v2.modeld_base import ModelStateBase
-from openpilot.sunnypilot.modeld_v2.helpers import load_oob
+from openpilot.sunnypilot.modeld_v2.helpers import load_model
+from openpilot.sunnypilot.modeld_v2.frame_fusion import fused_with_warp
 from openpilot.sunnypilot.modeld_v2.model_adapters import get_model_adapter
 from openpilot.sunnypilot.models.helpers import get_active_bundle
 from openpilot.sunnypilot.selfdrive.controls.lib.relc import RoadEdgeLaneChangeController
@@ -61,8 +66,7 @@ PKL_SWITCH_PATH = "/data/zoompilot_model_pkl"
 
 
 def _pkl_exists(path):
-  from openpilot.common.file_chunker import get_manifest_path
-  return os.path.exists(path) or os.path.exists(get_manifest_path(path))
+  return os.path.exists(path)
 
 
 def _switched_pkl():
@@ -128,7 +132,7 @@ class ModelState(ModelStateBase):
 
   def _init_combined(self, pkl_path, cam_w, cam_h, bundle):
     cloudlog.warning(f"loading combined pkl: {pkl_path}")
-    jits = load_oob(open_file_chunked(pkl_path))
+    jits = load_model(pkl_path, extend=fused_with_warp(cam_w, cam_h, self.chestnut))
 
     metadata = jits['metadata']
     self.WARP_DEV = metadata.get('warp_dev', 'QCOM') if COMMA_HARDWARE else 'CPU'
@@ -202,6 +206,8 @@ class ModelState(ModelStateBase):
       self.numpy_inputs['big_tfm'][:, :] = transforms[self._wide_key].reshape(3, 3)
 
     raw_outputs = self.adapter.run()
+    if self.chestnut and (err := Device[self.DEV].error_state.host.view(fmt='q')[0]):
+      raise RuntimeError(f"chestnut failed with {err}")
 
     if after_enqueue is not None:
       after_enqueue()
@@ -246,7 +252,8 @@ class ModelState(ModelStateBase):
     return outputs
 
   def get_action_from_model(self, model_output: dict[str, np.ndarray], prev_action: log.ModelDataV2.Action,
-                            lat_action_t: float, long_action_t: float, v_ego: float) -> log.ModelDataV2.Action:
+                            lat_action_t: float, long_action_t: float, v_ego: float,
+                            blendful: Callable[[float], float] | None = None) -> log.ModelDataV2.Action:
     if 'action' not in model_output:
       plan = model_output['plan'][0]
       desired_accel = get_accel_from_plan(plan[:, Plan.VELOCITY][:, 0], plan[:, Plan.ACCELERATION][:, 0], self.constants.T_IDXS,
@@ -257,7 +264,9 @@ class ModelState(ModelStateBase):
       desired_curvature = get_curvature_from_output(model_output, curvature_plan, v_ego, lat_action_t, self.mlsim)
     else:
       desired_accel = model_output['action'][0, 1]
-      desired_curvature = model_output['action'][0, 0] / (max(1.0, v_ego))**2
+      desired_curvature = model_output['action'][0, 0] / (max(2.5, v_ego))**2
+    if blendful is not None:
+      desired_curvature += blendful(desired_curvature)
 
     stop = v_ego < 0.3 and desired_accel < 0.1
     desired_accel = smooth_value(desired_accel, prev_action.desiredAcceleration, self.LONG_SMOOTH_SECONDS)
@@ -276,16 +285,19 @@ def main(demo=False):
 
   cloudlog.bind(daemon=PROCESS_NAME)
   setproctitle(PROCESS_NAME)
-  jetlink_adapter.prepare(CHESTNUT_PRESENT)  # before going realtime
-  config_realtime_process(7, 54)
 
-  CHESTNUT = CHESTNUT_PRESENT
+  CHESTNUT = _find_driving_pkl(get_active_bundle(chestnut=True)) is not None and \
+    (chestnut_present() or jetlink_adapter.chestnut_cable())
+  jetlink_adapter.prepare(CHESTNUT)  # before going realtime
   if CHESTNUT:
-    os.environ['HCQDEV_WAIT_TIMEOUT_MS'] = '3000'
+    from tinygrad.runtime.ops_amd import AMDDevice
+    AMDDevice.wait_timeout_ms = 3000
 
   params = Params()
   params.put_bool("ChestnutLoading", CHESTNUT)
   params.remove("ChestnutActive")
+
+  gc.disable()
 
   # visionipc clients
   while True:
@@ -310,6 +322,9 @@ def main(demo=False):
   if use_extra_client:
     cloudlog.warning(f"connected extra cam with buffer size: {vipc_client_extra.buffer_len} ({vipc_client_extra.width} x {vipc_client_extra.height})")
 
+  cam_w, cam_h = vipc_client_main.width, vipc_client_main.height
+  assert cam_w is not None and cam_h is not None
+
   cloudlog.warning("loading model")
   st = time.monotonic()
 
@@ -319,7 +334,8 @@ def main(demo=False):
     def load_big():
       nonlocal big_model
       try:
-        m = ModelState(cam_w=vipc_client_main.width, cam_h=vipc_client_main.height, chestnut=True)
+        wait_for_chestnut()
+        m = ModelState(cam_w=cam_w, cam_h=cam_h, chestnut=True)
         m.warmup()
         big_model = m
       except Exception:
@@ -328,15 +344,25 @@ def main(demo=False):
     loader.start()
     loader.join(BIG_MODEL_TIMEOUT)
     model = big_model
-    params.put_bool("ChestnutActive", model is not None)
+    if model is None and not params.get_bool("ChestnutRetry"):
+      # a crank can cut the chestnut power during the load, retry once with an onroad cycle
+      cloudlog.error("big model load failed, cycling onroad to retry")
+      params.put_bool("ChestnutRetry", True)
+      params.put_bool("OnroadCycleRequested", True)
+    else:
+      params.put_bool("ChestnutActive", model is not None)
 
-  small_model = ModelState(cam_w=vipc_client_main.width, cam_h=vipc_client_main.height, chestnut=False) if model is None or CHESTNUT else None
+  small_model = ModelState(cam_w=cam_w, cam_h=cam_h, chestnut=False) if model is None or CHESTNUT else None
   if model is None:
     model = small_model
+  elif small_model is not None:
+    small_model.warmup()  # the chestnut's fallback: its first run is ~1.3 s
   model = jetlink_adapter.attach(model, small_model, vipc_client_main.width, vipc_client_main.height)
   params.put_bool("ChestnutLoading", False)
   assert model is not None
   cloudlog.warning(f"models loaded in {time.monotonic() - st:.1f}s, modeld starting")
+
+  config_realtime_process(7, 54)
 
   # messaging
   pub_socks = ["modelV2", "drivingModelData", "cameraOdometry", "modelDataV2SP"] + (["chestnutGpuState"] if CHESTNUT else [])
@@ -363,11 +389,10 @@ def main(demo=False):
   buf_main, buf_extra = None, None
   meta_main = FrameMeta()
   meta_extra = FrameMeta()
-  camera_offset_helper = CameraOffsetHelper()
+  settings = ModelSettings()
 
 
   if demo:
-    from opendbc.car.car_helpers import get_demo_car_params
     CP = get_demo_car_params()
   else:
     CP = messaging.log_from_bytes(params.get("CarParams", block=True), car.CarParams)
@@ -420,11 +445,11 @@ def main(demo=False):
     is_rhd = sm["driverMonitoringState"].isRHD
     frame_id = sm["narrowRoadCameraState"].frameId
     v_ego = max(sm["carState"].vEgo, 0.)
-    if sm.frame % 60 == 0:
-      model.lat_delay = get_lat_delay(params, sm["lateralDelay"].lateralDelay)
+    if settings.refresh(sm, params, model):
       model.PLANPLUS_CONTROL = params.get("PlanplusControl", return_default=True)
       base_camera_offset = params.get("CameraOffset", return_default=True)
-    camera_offset_helper.set_offset(context_offset.camera_offset(base_camera_offset))
+    settings.camera_offset.set_offset(context_offset.camera_offset(base_camera_offset))
+    big_lat_smooth = settings.big_lat_smooth(model)
     lat_delay = model.lat_delay + model.LAT_SMOOTH_SECONDS
     long_delay = CP.longitudinalActuatorDelay + model.LONG_SMOOTH_SECONDS
     if sm.updated["extrinsicsCalibration"] and sm.seen['narrowRoadCameraState'] and sm.seen['deviceState']:
@@ -433,7 +458,7 @@ def main(demo=False):
       main_intrinsics = dc.wide_road.intrinsics if main_wide_camera else dc.narrow_road.intrinsics
       model_transform_main = get_warp_matrix(device_from_calib_euler, main_intrinsics, False).astype(np.float32)
       model_transform_extra = get_warp_matrix(device_from_calib_euler, dc.wide_road.intrinsics, True).astype(np.float32)
-      model_transform_main, model_transform_extra = camera_offset_helper.update(model_transform_main, model_transform_extra, sm, main_wide_camera)
+      model_transform_main, model_transform_extra = settings.camera_offset.update(model_transform_main, model_transform_extra, sm, main_wide_camera)
       live_calib_seen = True
 
     traffic_convention = np.zeros(2)
@@ -481,7 +506,7 @@ def main(demo=False):
                        run_count % round(model.constants.MODEL_FREQ / SERVICE_LIST['chestnutGpuState'].frequency) == 0)
       model_output = model.run(bufs, transforms, inputs, chestnut_state.send if send_chestnut else None)
     except Exception:
-      if not params.get_bool("ChestnutActive"):
+      if not model.chestnut:
         raise
       cloudlog.exception("big model failed, fall back to small")
       params.put_bool("ChestnutActive", False)
@@ -505,7 +530,9 @@ def main(demo=False):
 
       if not sm['carControl'].latActive:
         prev_action.desiredCurvature = sm['controlsState'].curvature
-      action = model.get_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego)
+      action = model.get_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego,
+                                           settings.blendful_callback(model_output, v_ego, desire, DH.lane_change_state))
+      settings.smooth_curvature(action, prev_action, big_lat_smooth)
       prev_action = action
       fill_model_msg(drivingdata_send, modelv2_send, model_output, action,
                      publish_state, meta_main.frame_id, meta_extra.frame_id, frame_id,
@@ -525,6 +552,7 @@ def main(demo=False):
       modelv2_send.modelV2.meta.laneChangeDirection = DH.lane_change_direction
       mdv2sp_send.valid = modelv2_send.valid
       mdv2sp_send.modelDataV2SP.laneTurnDirection = DH.lane_turn_direction
+      settings.blendful.fill(mdv2sp_send.modelDataV2SP)
       drivingdata_send.drivingModelData.meta.laneChangeState = DH.lane_change_state
       drivingdata_send.drivingModelData.meta.laneChangeDirection = DH.lane_change_direction
 

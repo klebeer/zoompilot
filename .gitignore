@@ -51,7 +51,7 @@ st[0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z]
 *.stats
 *.pkl
 *.pkl*
-!openpilot/selfdrive/modeld/models/big_*_tinygrad.pkl
+!openpilot/selfdrive/modeld/models/big_driving_tinygrad.pkl
 !openpilot/sunnypilot/modeld_v2/models/*.pkl
 config.json
 compile_commands.json
@@ -63,7 +63,6 @@ docs/_site/
 openpilot/selfdrive/pandad/pandad
 openpilot/cereal/services.h
 openpilot/cereal/gen
-openpilot/cereal/messaging/bridge
 openpilot/selfdrive/ui/translations/tmp
 openpilot/selfdrive/car/tests/cars_dump
 openpilot/system/camerad/camerad

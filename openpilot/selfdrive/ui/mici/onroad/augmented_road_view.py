@@ -1,5 +1,5 @@
 import numpy as np
-import pyray as rl
+import raylib_nb as rl
 from openpilot.cereal import log
 from opendbc.car.structs import car
 from openpilot.cereal.visionipc import VisionStreamType
@@ -7,20 +7,24 @@ from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
 from openpilot.selfdrive.ui.mici.onroad import SIDE_PANEL_WIDTH
 from openpilot.selfdrive.ui.mici.onroad.alert_renderer import AlertRenderer
 from openpilot.selfdrive.ui.mici.onroad.driver_state import DriverStateRenderer
+from openpilot.selfdrive.ui.mici.onroad.status import status_fade
 from openpilot.selfdrive.ui.mici.onroad.hud_renderer import HudRenderer
+from openpilot.selfdrive.ui.mici.onroad.long_indicator import LongIndicator
 from openpilot.selfdrive.ui.mici.onroad.model_renderer import ModelRenderer
+from openpilot.selfdrive.ui.mici.onroad.navigation import NavigationPanel, PANEL_WIDTH
 from openpilot.selfdrive.ui.mici.onroad.confidence_ball import ConfidenceBall
 from openpilot.selfdrive.ui.mici.onroad.cameraview import CameraView
 from openpilot.system.ui.lib.application import FontWeight, gui_app, MousePos, MouseEvent, TextAlignment, TextAlignmentVertical
 from openpilot.system.ui.widgets.label import UnifiedLabel
 from openpilot.system.ui.widgets import Widget
-from openpilot.common.filter_simple import BounceFilter
+from openpilot.common.filter_simple import BounceFilter, FirstOrderFilter
 from openpilot.common.transformations.camera import DEVICE_CAMERAS, DeviceCameraConfig, view_frame_from_device_frame
 from openpilot.common.transformations.orientation import rot_from_euler
 from enum import IntEnum
 
 if gui_app.sunnypilot_ui():
   from openpilot.selfdrive.ui.sunnypilot.mici.onroad.hud_renderer import HudRendererSP as HudRenderer
+  from openpilot.selfdrive.ui.sunnypilot.mici.onroad.long_indicator import LongIndicatorSP as LongIndicator
   from openpilot.selfdrive.ui.sunnypilot.ui_state import OnroadTimerStatus
 
 OpState = log.SelfdriveState.OpenpilotState
@@ -35,14 +39,15 @@ class BookmarkState(IntEnum):
   DRAGGING = 1
   TRIGGERED = 2
 
-WIDE_CAM_MAX_SPEED = 5.0  # m/s (10 mph)
-ROAD_CAM_MIN_SPEED = 10  # m/s (25 mph)
+WIDE_CAM_MAX_SPEED = 5.0  # m/s (11 mph)
+ROAD_CAM_MIN_SPEED = 10.0  # m/s (22 mph)
 
 CAM_Y_OFFSET = 20
+LEFT_COLUMN_WIDTH = 92
 
 
 class BookmarkIcon(Widget):
-  PEEK_THRESHOLD = 50  # If icon peeks out this much, snap it fully visible
+  PEEK_THRESHOLD = 150 # If icon peeks out this much, snap it fully visible
   FULL_VISIBLE_OFFSET = 200  # How far onscreen when fully visible
   HIDDEN_OFFSET = -50  # How far offscreen when hidden
 
@@ -50,7 +55,9 @@ class BookmarkIcon(Widget):
     super().__init__()
     self._bookmark_callback = bookmark_callback
     self._icon = gui_app.texture("icons_mici/onroad/bookmark.png", 180, 180)
+    self._filled_icon = gui_app.texture("icons_mici/onroad/bookmark_fill.png", 180, 180)
     self._offset_filter = BounceFilter(0.0, 0.1, 1 / gui_app.target_fps)
+    self._active_alpha = FirstOrderFilter(0.0, 0.1, 1 / gui_app.target_fps)
 
     # State
     self._interacting = False
@@ -60,6 +67,8 @@ class BookmarkIcon(Widget):
     self._is_swiping = False
     self._is_swiping_left: bool = False
     self._triggered_time: float = 0.0
+    self._triggered_duration = 1.5
+    self._swipe_expired = False
 
   def is_swiping_left(self) -> bool:
     """Check if currently swiping left (for scroller to disable)."""
@@ -70,18 +79,25 @@ class BookmarkIcon(Widget):
     return interacting
 
   def _update_state(self):
+    if self._state == BookmarkState.TRIGGERED and rl.get_time() - self._triggered_time >= self._triggered_duration:
+      self._state = BookmarkState.HIDDEN
+      self._swipe_expired = self._is_swiping
+
+    swipe_offset = self._swipe_start_x - self._swipe_current_x
+    armed = self._state == BookmarkState.DRAGGING and swipe_offset > self.PEEK_THRESHOLD
     if self._state == BookmarkState.DRAGGING:
-      # Allow pulling past activated position with rubber band effect
-      swipe_offset = self._swipe_start_x - self._swipe_current_x
+      # Snap to the released position when armed, while allowing further dragging or cancellation.
+      if armed:
+        swipe_offset += self.FULL_VISIBLE_OFFSET - self.PEEK_THRESHOLD
       swipe_offset = min(swipe_offset, self.FULL_VISIBLE_OFFSET + 50)
       self._offset_filter.update(swipe_offset)
 
     elif self._state == BookmarkState.TRIGGERED:
-      # Continue animating to fully visible
-      self._offset_filter.update(self.FULL_VISIBLE_OFFSET)
-      # Stay in TRIGGERED state for 1 second
-      if rl.get_time() - self._triggered_time >= 1.5:
-        self._state = BookmarkState.HIDDEN
+      # Let another left swipe move the same bookmark.
+      offset = self.FULL_VISIBLE_OFFSET
+      if self._is_swiping and self._is_swiping_left:
+        offset += min(swipe_offset, 50)
+      self._offset_filter.update(offset)
 
     elif self._state == BookmarkState.HIDDEN:
       self._offset_filter.update(self.HIDDEN_OFFSET)
@@ -89,17 +105,23 @@ class BookmarkIcon(Widget):
       if self._offset_filter.x < 1e-3:
         self._interacting = False
 
+    self._active_alpha.update(float(armed or self._state == BookmarkState.TRIGGERED))
+
   def _handle_mouse_event(self, mouse_event: MouseEvent):
     if not ui_state.started:
       return
 
     if mouse_event.left_pressed:
+      if self._state == BookmarkState.TRIGGERED:
+        self._triggered_time = rl.get_time()
+        self._triggered_duration = 0.5
+
       # Store relative position within widget
       self._swipe_start_x = mouse_event.pos.x
       self._swipe_current_x = mouse_event.pos.x
       self._is_swiping = True
       self._is_swiping_left = False
-      self._state = BookmarkState.DRAGGING
+      self._swipe_expired = False
 
     elif mouse_event.left_down and self._is_swiping:
       self._swipe_current_x = mouse_event.pos.x
@@ -107,30 +129,34 @@ class BookmarkIcon(Widget):
       self._is_swiping_left = swipe_offset > 0
       if self._is_swiping_left:
         self._interacting = True
+        if self._state == BookmarkState.HIDDEN and not self._swipe_expired:
+          self._state = BookmarkState.DRAGGING
 
     elif mouse_event.left_released:
-      if self._is_swiping:
+      if self._is_swiping and self._state == BookmarkState.DRAGGING:
         swipe_distance = self._swipe_start_x - self._swipe_current_x
 
         # If peeking past threshold, transition to animating to fully visible and bookmark
         if swipe_distance > self.PEEK_THRESHOLD:
           self._state = BookmarkState.TRIGGERED
           self._triggered_time = rl.get_time()
+          self._triggered_duration = 1.5
           self._bookmark_callback()
         else:
           # Otherwise, transition back to hidden
           self._state = BookmarkState.HIDDEN
 
-        # Reset swipe state
-        self._is_swiping = False
-        self._is_swiping_left = False
+      # Reset swipe state
+      self._is_swiping = False
+      self._is_swiping_left = False
 
   def _render(self, _):
     """Render the bookmark icon."""
     if self._offset_filter.x > 0:
       icon_x = self.rect.x + self.rect.width - round(self._offset_filter.x)
       icon_y = self.rect.y + (self.rect.height - self._icon.height) / 2  # Vertically centered
-      rl.draw_texture_ex(self._icon, rl.Vector2(icon_x, icon_y), 0.0, 1.0, rl.WHITE)
+      for icon, alpha in ((self._icon, 1.0 - self._active_alpha.x), (self._filled_icon, self._active_alpha.x)):
+        rl.draw_texture_ex(icon, rl.Vector2(icon_x, icon_y), 0.0, 1.0, rl.Color(255, 255, 255, round(255 * alpha)))
 
 
 class AugmentedRoadView(CameraView):
@@ -151,15 +177,20 @@ class AugmentedRoadView(CameraView):
     # Bookmark icon with swipe gesture
     self._bookmark_icon = BookmarkIcon(bookmark_callback)
 
+    self._navigation = NavigationPanel()
     self._model_renderer = ModelRenderer()
     self._hud_renderer = HudRenderer()
+    self._long_indicator = LongIndicator()
     self._alert_renderer = AlertRenderer()
-    self._driver_state_renderer = DriverStateRenderer()
+    self._driver_state_renderer = DriverStateRenderer(background=False)
     self._confidence_ball = ConfidenceBall()
     self._offroad_label = UnifiedLabel("start the car to\nuse sunnypilot", 54, FontWeight.DISPLAY,
                                        text_color=rl.Color(255, 255, 255, int(255 * 0.9)),
                                        alignment=TextAlignment.CENTER,
                                        alignment_vertical=TextAlignmentVertical.MIDDLE)
+    self._offroad_sublabel = UnifiedLabel("", 40, FontWeight.ROMAN,
+                                          text_color=rl.Color(255, 255, 255, int(255 * 0.9 * 0.65)),
+                                          alignment=TextAlignment.CENTER)
 
     self._fade_texture = gui_app.texture("icons_mici/onroad/onroad_fade.png")
 
@@ -173,21 +204,29 @@ class AugmentedRoadView(CameraView):
     # update offroad label
     if ui_state.panda_type == log.PandaState.PandaType.unknown:
       self._offroad_label.set_text("system booting")
+      self._offroad_label.set_font_size(54)
+      self._offroad_sublabel.set_text("")
     elif ui_state.ignition and not ui_state.started:
-      self._offroad_label.set_text("openpilot can't start\ncheck alerts")
+      self._offroad_label.set_text("openpilot can't start")
+      self._offroad_label.set_font_size(46)
+      self._offroad_sublabel.set_text("check alerts")
     else:
       self._offroad_label.set_text("start the car to\nuse sunnypilot")
+      self._offroad_label.set_font_size(54)
+      self._offroad_sublabel.set_text("")
 
   def _handle_mouse_release(self, mouse_pos: MousePos):
     # Don't trigger click callback if bookmark was triggered
     if not self._bookmark_icon.interacting():
       super()._handle_mouse_release(mouse_pos)
 
-  def _render(self, _):
-    # Draw text if not onroad
+  def _render(self, rect: rl.Rectangle):
+    # Offroad shows the side panel in its disengaged state with text in the camera area
     if not ui_state.started:
       rl.draw_rectangle_rec(self.rect, rl.BLACK)
-      self._offroad_label.render(self._rect)
+      self._render_offroad_text(rl.Rectangle(self.rect.x + SIDE_PANEL_WIDTH, self.rect.y, self.rect.width - SIDE_PANEL_WIDTH, self.rect.height))
+      self._hud_renderer.set_wheel_critical_icon(False)
+      self._render_left_panel(False)
       return
 
     self._switch_stream_if_needed(ui_state.sm)
@@ -195,11 +234,15 @@ class AugmentedRoadView(CameraView):
     # Update calibration before rendering
     self._update_calibration()
 
-    # Create inner content area with border padding
+    alert_to_render, not_animating_out = self._alert_renderer.will_render()
+    show_navigation = ui_state.navigation_enabled and ui_state.nav_destination_set and alert_to_render is None
+
+    # Create inner content area with border padding. Without navigation, the black side panel is on the left
+    side_panel = 0 if show_navigation else SIDE_PANEL_WIDTH
     self._content_rect = rl.Rectangle(
-      self.rect.x,
+      self.rect.x + side_panel,
       self.rect.y,
-      self.rect.width - SIDE_PANEL_WIDTH,
+      self.rect.width - (PANEL_WIDTH if show_navigation else SIDE_PANEL_WIDTH),
       self.rect.height,
     )
 
@@ -221,20 +264,17 @@ class AugmentedRoadView(CameraView):
     # Fade out bottom of overlays for looks
     rl.draw_texture_ex(self._fade_texture, rl.Vector2(self._content_rect.x, self._content_rect.y), 0.0, 1.0, rl.WHITE)
 
-    alert_to_render, not_animating_out = self._alert_renderer.will_render()
-
-    # Hide DMoji when disengaged unless AlwaysOnDM is enabled
-    should_draw_dmoji = (not self._hud_renderer.drawing_top_icons() and
-                         (ui_state.status != UIStatus.DISENGAGED or ui_state.always_on_dm))
-    self._driver_state_renderer.set_should_draw(should_draw_dmoji)
-    self._driver_state_renderer.set_position(self._rect.x + 16, self._rect.y + 10)
-    self._driver_state_renderer.render()
-
     self._hud_renderer.set_can_draw_top_icons(alert_to_render is None)
+    # critical alerts show a warning icon where the torque bar is
+    self._hud_renderer.set_torque_bar_hidden(alert_to_render is not None and alert_to_render.status == log.SelfdriveState.AlertStatus.critical)
     self._hud_renderer.set_wheel_critical_icon(alert_to_render is not None and not not_animating_out and
                                                alert_to_render.visual_alert == car.CarControl.HUDControl.VisualAlert.steerRequired)
     self._alert_renderer.render(self._content_rect)
     self._hud_renderer.render(self._content_rect)
+
+    if not show_navigation:
+      self._confidence_ball.set_hidden(alert_to_render is not None and not not_animating_out)
+      self._confidence_ball.render(self._content_rect)
 
     # Draw fake rounded border
     rl.draw_rectangle_rounded_lines_ex(self._content_rect, 0.2 * 1.02, 10, 50, rl.BLACK)
@@ -242,14 +282,54 @@ class AugmentedRoadView(CameraView):
     # End clipping region
     rl.end_scissor_mode()
 
+    self._render_left_panel(show_navigation)
+
     # Custom UI extension point - add custom overlays here
     # Use self._content_rect for positioning within camera bounds
-    self._confidence_ball.render(self.rect)
+    if show_navigation:
+      self._navigation.render(rl.Rectangle(self._content_rect.x + self._content_rect.width, self.rect.y, PANEL_WIDTH, self.rect.height))
 
     self._bookmark_icon.render(self.rect)
 
+  def _render_offroad_text(self, rect: rl.Rectangle):
+    # center the label and optional subline together
+    if not self._offroad_sublabel.text:
+      self._offroad_label.render(rect)
+      return
+    gap = 8
+    label_h = self._offroad_label.get_content_height(int(rect.width))
+    sub_h = self._offroad_sublabel.get_content_height(int(rect.width))
+    y = rect.y + (rect.height - label_h - gap - sub_h) / 2
+    self._offroad_label.render(rl.Rectangle(rect.x, y, rect.width, label_h))
+    self._offroad_sublabel.render(rl.Rectangle(rect.x, y + label_h + gap, rect.width, sub_h))
+
+  def _render_left_panel(self, show_navigation: bool):
+    # DMoji, longitudinal indicator, and steering wheel are centered in the black side panel on the left,
+    # or in a column along the left edge of the camera when navigation takes the side panel
+    left_rect = rl.Rectangle(self._rect.x, self._rect.y, SIDE_PANEL_WIDTH, self._rect.height)
+    if show_navigation:
+      left_rect = rl.Rectangle(self._content_rect.x, self._content_rect.y, LEFT_COLUMN_WIDTH, self._content_rect.height)
+
+    # Grey out DMoji when disengaged unless AlwaysOnDM is enabled. In the side panel nothing overlaps it, otherwise it hides under the set speed
+    self._driver_state_renderer.set_should_draw(not show_navigation or not self._hud_renderer.drawing_top_icons())
+    self._driver_state_renderer.set_dimmed(1.0 if not ui_state.started else 0.0 if ui_state.always_on_dm else status_fade.weight(UIStatus.DISENGAGED))
+    self._driver_state_renderer.set_show_under_alerts(not show_navigation)
+    # the 52px cone is centered 36px from the top left
+    dm_size = self._driver_state_renderer.rect.width
+    self._driver_state_renderer.set_position(left_rect.x + (left_rect.width - dm_size) / 2, left_rect.y + 36 - dm_size / 2)
+    self._driver_state_renderer.render()
+    # sunnypilot: with navigation the column is over the camera, where the left blind spot icon draws
+    left_bsm = show_navigation and gui_app.sunnypilot_ui() and self._hud_renderer.left_blind_spot_detected()
+    self._long_indicator.set_should_draw((not show_navigation or not self._hud_renderer.drawing_top_icons()) and not left_bsm)
+    self._long_indicator.render(left_rect)
+    self._hud_renderer.render_steering_wheel(left_rect)
+
+  def close(self):
+    self._navigation.close()
+    super().close()
+
   def _switch_stream_if_needed(self, sm):
-    if sm['selfdriveState'].experimentalMode and WIDE_CAM in self.available_streams:
+    if sm['carParams'].openpilotLongitudinalControl and WIDE_CAM in self.available_streams:
       v_ego = sm['carState'].vEgo
       if v_ego < WIDE_CAM_MAX_SPEED:
         target = WIDE_CAM

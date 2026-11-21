@@ -12,14 +12,14 @@
       "sections": [
         {
           "id": "mads",
-          "title": "Modular Assistive Driving System (MADS)",
+          "title": "When to Steer",
           "description": "",
           "items": [
             {
               "key": "Mads",
               "widget": "toggle",
-              "title": "Enable Modular Assistive Driving System (MADS)",
-              "description": "Enable MADS. Disable toggle to revert back to stock sunnypilot engagement/disengagement.",
+              "title": "Steer Without Cruise",
+              "description": "Lets zoompilot steer while cruise control is off. When off, steering and cruise engage and disengage together.",
               "enablement": [
                 {
                   "type": "offroad_only"
@@ -30,7 +30,7 @@
           "sub_panels": [
             {
               "id": "mads_settings",
-              "label": "MADS Settings",
+              "label": "When to Steer",
               "trigger_key": "Mads",
               "trigger_condition": {
                 "type": "param",
@@ -41,8 +41,8 @@
                 {
                   "key": "MadsMainCruiseAllowed",
                   "widget": "toggle",
-                  "title": "Toggle with Main Cruise",
-                  "description": "Note: For vehicles without LFA/LKAS button, disabling this will prevent lateral control engagement.",
+                  "title": "Steer When Cruise On",
+                  "description": "Turning cruise on with its on/off button also turns steering on. Cars without a lane keep button need this on to steer.",
                   "enablement": [
                     {
                       "type": "offroad_only"
@@ -83,8 +83,8 @@
                 {
                   "key": "MadsUnifiedEngagementMode",
                   "widget": "toggle",
-                  "title": "Unified Engagement Mode (UEM)",
-                  "description": "Engage lateral and longitudinal control with cruise control engagement. Note: Once lateral control is engaged via UEM, it will remain engaged until it is manually disabled via the MADS button or car shut off.",
+                  "title": "Steer When Cruise Set",
+                  "description": "Setting or resuming a cruise speed also turns steering on. Steering then stays on until you switch it off or turn off the car.",
                   "enablement": [
                     {
                       "type": "offroad_only"
@@ -126,7 +126,7 @@
                   "key": "MazdaTjaButton",
                   "widget": "toggle",
                   "title": "Mazda TJA Button",
-                  "description": "The physical TJA button toggles Automatic Lane Centering and MRCC only controls cruise. Main Cruise and UEM no longer engage or disengage lateral control. Enable only if your car has the button.",
+                  "description": "The wheel's TJA button becomes the only steering switch. The MRCC button then only controls cruise. Turn on only if your car has the button.",
                   "visibility": [
                     {
                       "type": "capability",
@@ -143,12 +143,12 @@
                 {
                   "key": "MadsSteeringMode",
                   "widget": "multiple_button",
-                  "title": "Steering Mode on Brake Pedal",
-                  "description": "Choose how Automatic Lane Centering (ALC) behaves after the brake pedal is manually pressed in sunnypilot.",
+                  "title": "Steering on Brake",
+                  "description": "What steering does when you press the brake. Remain keeps steering. Pause resumes it when you let go. Disengage turns steering off.",
                   "options": [
                     {
                       "value": 0,
-                      "label": "Remain Active",
+                      "label": "Remain",
                       "enablement": [
                         {
                           "type": "not",
@@ -562,9 +562,23 @@
             },
             {
               "key": "RoadEdgeLaneChangeEnabled",
-              "widget": "toggle",
+              "widget": "multiple_button",
               "title": "Block Lane Change: Road Edge Detection",
-              "description": "Blocks lane change when the model sees a road edge on the side you signal."
+              "description": "Blocks lane change when the model sees a road edge on the side you signal. Silent shows the alert without the chime.",
+              "options": [
+                {
+                  "value": 0,
+                  "label": "Off"
+                },
+                {
+                  "value": 1,
+                  "label": "Audible"
+                },
+                {
+                  "value": 2,
+                  "label": "Silent"
+                }
+              ]
             },
             {
               "key": "LaneChangeSmoothing",
@@ -602,7 +616,7 @@
               "enablement": [
                 {
                   "type": "capability",
-                  "field": "enable_bsm",
+                  "field": "has_bsm",
                   "equals": true
                 },
                 {
@@ -635,8 +649,8 @@
               "widget": "toggle",
               "needs_onroad_cycle": true,
               "blocked": true,
-              "title": "sunnypilot Longitudinal Control (Alpha)",
-              "description": "WARNING: sunnypilot longitudinal control is in alpha for this car and will disable Automatic Emergency Braking (AEB). On this car, sunnypilot defaults to the car's built-in ACC instead of sunnypilot's longitudinal control. Enable this to switch to sunnypilot longitudinal control. Enabling Experimental mode is recommended when enabling sunnypilot longitudinal control alpha. Changing this setting will restart sunnypilot if the car is powered on.",
+              "title": "zoompilot Longitudinal Control (Alpha)",
+              "description": "WARNING: zoompilot longitudinal control is in alpha for this car and may disable Automatic Emergency Braking (AEB). On this car, zoompilot defaults to the car's built-in ACC instead of zoompilot's longitudinal control. Enable this to switch to zoompilot longitudinal control. Changing this setting will restart zoompilot if the car is powered on.",
               "visibility": [
                 {
                   "type": "capability",
@@ -651,42 +665,10 @@
               ]
             },
             {
-              "key": "ExperimentalMode",
-              "widget": "toggle",
-              "title": "Experimental Mode",
-              "enablement": [
-                {
-                  "type": "capability",
-                  "field": "has_longitudinal_control",
-                  "equals": true
-                }
-              ]
-            },
-            {
-              "key": "DynamicExperimentalControl",
-              "widget": "toggle",
-              "title": "Dynamic Experimental Control",
-              "description": "Let the model decide when to use sunnypilot ACC or sunnypilot End to End Longitudinal.",
-              "visibility": [
-                {
-                  "type": "capability",
-                  "field": "has_longitudinal_control",
-                  "equals": true
-                }
-              ],
-              "enablement": [
-                {
-                  "type": "capability",
-                  "field": "has_longitudinal_control",
-                  "equals": true
-                }
-              ]
-            },
-            {
               "key": "ExperimentalModeSetSpeed",
               "widget": "toggle",
-              "title": "Experimental Mode Speed Assist",
-              "description": "In Experimental Mode, gently raise speed toward the set speed when nothing calls for slowing down. Has no effect while Dynamic Experimental Control is on.",
+              "title": "Set Speed Assist",
+              "description": "Drive toward your set speed and following distance whenever the driving model holds back. The model still makes every slowdown. The onroad button and a long press of the distance button switch it too.",
               "visibility": [
                 {
                   "type": "capability",
@@ -699,36 +681,6 @@
                   "type": "capability",
                   "field": "has_longitudinal_control",
                   "equals": true
-                },
-                {
-                  "type": "param",
-                  "key": "DynamicExperimentalControl",
-                  "equals": false
-                }
-              ]
-            },
-            {
-              "key": "ExperimentalModeLeadGap",
-              "widget": "toggle",
-              "title": "Experimental Mode Lead Follow Assist",
-              "description": "Closes the gap to your driving personality's following distance behind a steady car. Never closer than chill mode. No effect while Dynamic Experimental Control is on.",
-              "visibility": [
-                {
-                  "type": "capability",
-                  "field": "has_longitudinal_control",
-                  "equals": true
-                }
-              ],
-              "enablement": [
-                {
-                  "type": "capability",
-                  "field": "has_longitudinal_control",
-                  "equals": true
-                },
-                {
-                  "type": "param",
-                  "key": "DynamicExperimentalControl",
-                  "equals": false
                 }
               ]
             }
@@ -1002,26 +954,26 @@
                   "key": "SpeedLimitPolicy",
                   "widget": "multiple_button",
                   "title": "Speed Limit Source",
+                  "description": "Auto follows the limit your car shows, and the map where it shows none. The map also slows you before a lower limit ahead.",
                   "options": [
                     {
+                      "value": 2,
+                      "label": "Auto"
+                    },
+                    {
                       "value": 0,
-                      "label": "Car State Only"
+                      "label": "Car Only"
                     },
                     {
                       "value": 1,
-                      "label": "Map Data Only"
-                    },
+                      "label": "Map Only"
+                    }
+                  ],
+                  "visibility": [
                     {
-                      "value": 2,
-                      "label": "Car State Priority"
-                    },
-                    {
-                      "value": 3,
-                      "label": "Map Data Priority"
-                    },
-                    {
-                      "value": 4,
-                      "label": "Combined"
+                      "type": "capability",
+                      "field": "has_speed_limit",
+                      "equals": true
                     }
                   ]
                 },
@@ -1200,6 +1152,75 @@
                     {
                       "type": "capability",
                       "field": "has_longitudinal_control",
+                      "equals": true
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "key": "CurveSpeedProfile",
+              "widget": "multiple_button",
+              "title": "Curve Speed",
+              "description": "How fast Slow for Curves takes turns. Gentle slows more, Sporty slows less.",
+              "options": [
+                {
+                  "value": 0,
+                  "label": "Gentle"
+                },
+                {
+                  "value": 1,
+                  "label": "Normal"
+                },
+                {
+                  "value": 2,
+                  "label": "Sporty"
+                }
+              ],
+              "visibility": [
+                {
+                  "type": "any",
+                  "conditions": [
+                    {
+                      "type": "capability",
+                      "field": "has_longitudinal_control",
+                      "equals": true
+                    },
+                    {
+                      "type": "capability",
+                      "field": "has_icbm",
+                      "equals": true
+                    }
+                  ]
+                }
+              ],
+              "enablement": [
+                {
+                  "type": "any",
+                  "conditions": [
+                    {
+                      "type": "capability",
+                      "field": "has_longitudinal_control",
+                      "equals": true
+                    },
+                    {
+                      "type": "capability",
+                      "field": "has_icbm",
+                      "equals": true
+                    }
+                  ]
+                },
+                {
+                  "type": "any",
+                  "conditions": [
+                    {
+                      "type": "param",
+                      "key": "SmartCruiseControlVision",
+                      "equals": true
+                    },
+                    {
+                      "type": "param",
+                      "key": "SmartCruiseControlMap",
                       "equals": true
                     }
                   ]
@@ -1450,6 +1471,12 @@
               ]
             },
             {
+              "key": "HomeShowActiveModel",
+              "widget": "toggle",
+              "title": "Show Driving Model on Home Screen",
+              "description": "Name the active driving model on the offroad home screen."
+            },
+            {
               "key": "ScreenSaverEnabled",
               "widget": "toggle",
               "title": "Screen Saver",
@@ -1538,6 +1565,45 @@
               "widget": "toggle",
               "title": "Steering Arc",
               "description": "Display steering arc on the driving screen when lateral control is enabled.",
+              "visibility": [
+                {
+                  "type": "not",
+                  "condition": {
+                    "type": "capability",
+                    "field": "device_type",
+                    "equals": "mici"
+                  }
+                }
+              ]
+            },
+            {
+              "key": "LaneCenterUI",
+              "widget": "toggle",
+              "title": "Lane Center Gauge",
+              "description": "Shows lane center assist's nudge as a gauge under the steering arc.",
+              "visibility": [
+                {
+                  "type": "not",
+                  "condition": {
+                    "type": "capability",
+                    "field": "device_type",
+                    "equals": "mici"
+                  }
+                }
+              ],
+              "enablement": [
+                {
+                  "type": "param",
+                  "key": "Blendful",
+                  "equals": true
+                }
+              ]
+            },
+            {
+              "key": "ConfidenceBall",
+              "widget": "toggle",
+              "title": "Confidence Ball",
+              "description": "Shows the model's confidence as a ball on your side of the screen, as on the comma 4: higher is more confident, and while engaged it is green, then yellow, then red as confidence drops.",
               "visibility": [
                 {
                   "type": "not",
@@ -1997,6 +2063,27 @@
               ]
             },
             {
+              "key": "NavigationEnabled",
+              "widget": "toggle",
+              "title": "Navigation (Alpha)",
+              "description": "Turn-by-turn navigation with a route map. Set a destination from comma connect.",
+              "visibility": [
+                {
+                  "type": "capability",
+                  "field": "device_type",
+                  "equals": "mici"
+                },
+                {
+                  "type": "not",
+                  "condition": {
+                    "type": "capability",
+                    "field": "is_sp_release",
+                    "equals": true
+                  }
+                }
+              ]
+            },
+            {
               "key": "ShowDebugInfo",
               "widget": "toggle",
               "title": "UI Debug Mode"
@@ -2176,8 +2263,20 @@
         {
           "id": "model_behavior",
           "title": "Model Behavior",
-          "description": "Lane desire and lead-vehicle awareness tuning",
+          "description": "Lane desire, lane center assist, and lead-vehicle awareness tuning",
           "items": [
+            {
+              "key": "Blendful",
+              "widget": "toggle",
+              "title": "Lane Center Assist (Alpha)",
+              "description": "Adds a gentle nudge toward lane center on top of the model's own steering, stronger when lane lines are clear. Yields around obstacles. The center line turns blue as it nudges; Lane Center UI in Visuals adds a gauge."
+            },
+            {
+              "key": "BigModelSmoothing",
+              "widget": "toggle",
+              "title": "smooth big model",
+              "description": "Gives big models the small models' steering smoothing. Can calm small side-to-side wiggles on straight roads."
+            },
             {
               "key": "LaneTurnDesire",
               "widget": "toggle",
@@ -2477,6 +2576,33 @@
               "type": "param",
               "key": "ToyotaEnforceStockLongitudinal",
               "equals": false
+            }
+          ]
+        },
+        {
+          "key": "ToyotaTSS2Smooth",
+          "widget": "toggle",
+          "needs_onroad_cycle": true,
+          "title": "TSS2 Smooth Longitudinal (Alpha)",
+          "description": "Enable smoother longitudinal control for TSS2 vehicles. Uses a custom speed-dependent integral gain curve for smoother traffic driving.",
+          "enablement": [
+            {
+              "type": "not_engaged"
+            },
+            {
+              "type": "capability",
+              "field": "has_longitudinal_control",
+              "equals": true
+            },
+            {
+              "type": "param",
+              "key": "ToyotaEnforceStockLongitudinal",
+              "equals": false
+            },
+            {
+              "type": "capability",
+              "field": "toyota_tss2",
+              "equals": true
             }
           ]
         }

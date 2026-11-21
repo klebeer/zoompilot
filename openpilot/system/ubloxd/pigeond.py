@@ -126,28 +126,6 @@ class TTYPigeon:
         raise TimeoutError('No response from ublox')
       time.sleep(0.001)
 
-  def reset_device(self) -> bool:
-    # deleting the backup does not always work on first try (mostly on second try)
-    for _ in range(5):
-      # device cold start
-      self.send(b"\xb5\x62\x06\x04\x04\x00\xff\xff\x00\x00\x0c\x5d")
-      time.sleep(1) # wait for cold start
-      init_baudrate(self)
-
-      # clear configuration
-      self.send_with_ack(b"\xb5\x62\x06\x09\x0d\x00\x1f\x1f\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x17\x71\xd7")
-
-      # clear flash memory (almanac backup)
-      self.send_with_ack(b"\xB5\x62\x09\x14\x04\x00\x01\x00\x00\x00\x22\xf0")
-
-      # try restoring backup to verify it got deleted
-      self.send(b"\xB5\x62\x09\x14\x00\x00\x1D\x60")
-      # 1: failed to restore, 2: could restore, 3: no backup
-      status = self.wait_for_backup_restore_status()
-      if status == 1 or status == 3:
-        return True
-    return False
-
 def send_time(pigeon: TTYPigeon) -> None:
   if not system_time_valid():
     return
@@ -192,6 +170,27 @@ def init_baudrate(pigeon: TTYPigeon):
   pigeon.send(b"\x24\x50\x55\x42\x58\x2C\x34\x31\x2C\x31\x2C\x30\x30\x30\x37\x2C\x30\x30\x30\x33\x2C\x34\x36\x30\x38\x30\x30\x2C\x30\x2A\x31\x35\x0D\x0A")
   time.sleep(0.1)
   pigeon.set_baud(460800)
+
+
+def send_position(pigeon: TTYPigeon) -> None:
+  if not (position := Params().get("LastGPSPosition")):
+    return
+
+  with log.Event.from_bytes(position) as evt:
+    gps = evt.gpsLocationExternal
+    if datetime.now(UTC).timestamp() - gps.unixTimestampMillis / 1000 > 7 * 24 * 3600:
+      return
+    cloudlog.warning("Sending last position to ublox")
+
+    # UBX-MGA-INI-POS_LLH
+    msg = add_ubx_checksum(b"\xB5\x62\x13\x40\x14\x00" + struct.pack("<BB2xiiiI",
+      0x01, 0x00,
+      round(gps.latitude * 1e7),
+      round(gps.longitude * 1e7),
+      round(gps.altitude * 100),
+      100_000 * 100,
+    ))
+  pigeon.send_with_ack(msg, ack=UBLOX_ASSIST_ACK)
 
 
 def init_pigeon(pigeon: TTYPigeon) -> bool:
@@ -274,6 +273,13 @@ def init(pigeon: TTYPigeon) -> None:
 
   init_baudrate(pigeon)
   init_pigeon(pigeon)
+
+  if system_time_valid():
+    try:
+      send_time(pigeon)
+      send_position(pigeon)
+    except Exception:
+      cloudlog.exception("failed to send time and position to ublox")
 
 def run_receiving(duration: int = 0):
   pm = messaging.PubMaster(['ubloxRaw'])

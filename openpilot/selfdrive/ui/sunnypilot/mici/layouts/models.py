@@ -6,7 +6,7 @@ See the LICENSE.md file in the root directory for more details.
 """
 import time
 
-import pyray as rl
+import raylib_nb as rl
 
 from openpilot.cereal import custom
 from openpilot.selfdrive.ui.mici.widgets.dialog import BigConfirmationDialog, BigDialog
@@ -17,6 +17,7 @@ from openpilot.selfdrive.ui.sunnypilot.accelerator_link import big_model_note, b
 from openpilot.selfdrive.ui.sunnypilot.model_info import (active_source, big_model_state, bundles_for_source, carrying_model,
                                                            default_model_name, model_cache_size_mb, model_info, queued_name,
                                                            refresh_in_progress, refresh_model_list)
+from openpilot.selfdrive.ui.sunnypilot.mici.layouts.models_zp import ModelOptions
 from openpilot.selfdrive.ui.sunnypilot.mici.widgets.button import BigMultiParamToggleSP
 from openpilot.sunnypilot.jetlink_adapter import KEYS, MODES
 from openpilot.system.ui.lib.application import FontWeight, gui_app
@@ -114,7 +115,7 @@ class ModelsLayoutMici(NavScroller):
 
     # the pills follow the param; locked onroad like the model buttons beside it: jetlink switches the link only parked
     self.link_toggle = BigMultiParamToggleSP(tr("jetlink"), KEYS.link, [tr(LINK_MODE_LABELS[m]) for m in MODES],
-                                             values=list(range(len(MODES))),
+                                             values=list(range(len(MODES))), off_index=0,
                                              description=tr("Runs big models on a computer or phone plugged into the comma.\n" +
                                                             "USB for a Mac, Jetson, Linux PC or Android. iOS for an iPhone or iPad.\n" +
                                                             "Turns off ADB. The small model drives until the big model is ready."))
@@ -127,8 +128,11 @@ class ModelsLayoutMici(NavScroller):
     self.clear_cache_btn.set_click_callback(self._confirm_clear_cache)
     self._cache_size_time = 0.0
 
-    self.main_items = [self.current_model_info, self.select_model_btn, self.cancel_download_btn, self.link_toggle, self.refresh_btn,
-                       self.clear_cache_btn]
+    self._options = ModelOptions()
+    self.blendful_toggle = self._options.lane_center
+
+    self.main_items = [self.current_model_info, self.select_model_btn, self.cancel_download_btn, self.blendful_toggle,
+                       *self._options.items, self.link_toggle, self._options.big_smoothing, self.refresh_btn, self.clear_cache_btn]
     self._scroller.add_widgets(self.main_items)
 
   @property
@@ -239,6 +243,11 @@ class ModelsLayoutMici(NavScroller):
       device.set_override_interactive_timeout(None)
       self._was_downloading = False
 
+  def show_event(self):
+    super().show_event()
+    self.blendful_toggle.refresh()
+    self._options.refresh()
+
   def _update_state(self):
     super()._update_state()
 
@@ -288,11 +297,13 @@ class ModelsLayoutMici(NavScroller):
       self.current_model_info.info_text.set_text(tr("download failed"))
 
     elif manager.selectedBundle and manager.selectedBundle.status == custom.ModelManagerSP.DownloadStatus.downloading:
-      self.cancel_download_btn.set_visible(True)
+      self.cancel_download_btn.set_visible(ui_state.params.get("ModelManager_DownloadRef") is not None)
       device.set_override_interactive_timeout(5)
       progress = 0.0
       count = 0
       verifying = False
+      canceling = False
+      speed = 0.0
       for model in manager.selectedBundle.models:
         count += 1
         p = model.artifact.downloadProgress
@@ -300,11 +311,14 @@ class ModelsLayoutMici(NavScroller):
                         custom.ModelManagerSP.DownloadStatus.verifying):
           progress += p.progress
           verifying = verifying or p.status == custom.ModelManagerSP.DownloadStatus.verifying
+          canceling = canceling or p.canceling
+          speed = max(speed, p.speed)  # only one file downloads at a time, so the non-zero speed is the live one
         elif p.status in (custom.ModelManagerSP.DownloadStatus.downloaded,
                           custom.ModelManagerSP.DownloadStatus.cached):
           progress += 100.0
 
-      self.current_model_info.current_model_header.set_text(tr("verifying") if verifying else tr("downloading"))
+      header = tr("canceling...") if canceling else tr("verifying") if verifying else tr("downloading")
+      self.current_model_info.current_model_header.set_text(header)
       self.cancel_download_btn.set_text(tr("cancel verification") if verifying else tr("cancel download"))
       self.current_model_info.current_model_header._shimmer = True
       name_text = manager.selectedBundle.internalName.lower()
@@ -313,7 +327,10 @@ class ModelsLayoutMici(NavScroller):
       self.current_model_info.current_model_text.set_text(name_text)
       self.current_model_info.info_header.set_text(tr("progress") + self._download_progress)
       self.current_model_info.info_header._shimmer = True
-      self.current_model_info.info_text.set_text(f"{progress/count:.2f}%")
+      progress_text = f"{progress/count:.2f}%"
+      if not verifying and not canceling:
+        progress_text += f"  |  {speed / 1024 ** 2:.1f} MB/s" if speed > 0 else "  |  --.- MB/s"
+      self.current_model_info.info_text.set_text(progress_text)
 
     elif manager.selectedBundle and manager.selectedBundle.status == custom.ModelManagerSP.DownloadStatus.downloaded:
       self.current_model_info.info_header.set_text(tr("downloaded"))

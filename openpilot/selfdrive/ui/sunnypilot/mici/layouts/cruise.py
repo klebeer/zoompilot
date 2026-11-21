@@ -5,8 +5,7 @@ This file is part of zoompilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 """
 
-from openpilot.selfdrive.ui.sunnypilot.longitudinal_mode import alpha_longitudinal_reachable, longitudinal_mode_labels
-from openpilot.selfdrive.ui.sunnypilot.mici.layouts.alpha_longitudinal import AlphaLongitudinalLayoutMici
+from openpilot.selfdrive.ui.sunnypilot.mici.layouts.alpha_longitudinal import AlphaLongitudinalTogglesMici
 from openpilot.selfdrive.ui.sunnypilot.mici.widgets.button import (
   BigButtonSP,
   BigMultiParamToggleSP,
@@ -19,9 +18,11 @@ from openpilot.system.ui.widgets.scroller import NavScroller
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.sunnypilot.selfdrive.car.intelligent_cruise_button_management.helpers import icbm_moves_speed_limits
+from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.common import Policy
+from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.source_auto import AUTO, car_shows_limit
 
 SL_MODE_LABELS = [tr("off"), tr("info"), tr("warn"), tr("assist")]
-SL_SOURCE_LABELS = [tr("car"), tr("map"), tr("car-first"), tr("map-first"), tr("combined")]
+SL_SOURCE_LABELS = {AUTO: tr("auto"), Policy.car_state_only: tr("car"), Policy.map_data_only: tr("map")}
 SL_MODE_OFF = 0
 SL_MODE_WARN = 2
 SL_MODE_ASSIST = 3
@@ -43,7 +44,7 @@ def _offset_label(value):
 
 
 class CruiseLayoutMici(NavScroller):
-  """Cruise settings: alpha longitudinal, SCC, speed limit assist, custom ACC increments.
+  """Cruise settings: alpha longitudinal and Set Speed Assist, SCC, speed limit assist, custom ACC increments.
 
   State gating pattern:
     - _update_state runs every frame, reads params and enables/disables widgets
@@ -57,24 +58,26 @@ class CruiseLayoutMici(NavScroller):
 
     self._prev_sla_available: bool | None = None
 
-    self._alpha_long_btn = BigButtonSP(tr("alpha longitudinal"))
-    alpha_long_view = AlphaLongitudinalLayoutMici()
-    self._alpha_long_btn.set_click_callback(lambda: gui_app.push_widget(alpha_long_view))
+    self._alpha_long = AlphaLongitudinalTogglesMici()
     self._scc_v_toggle = BigParamControlSP(tr("slow for curves: vision"), "SmartCruiseControlVision",
                                            description=tr("Slows for curves the camera sees, then resumes your set speed.\n" +
                                                           "Works alone or with slow for curves: map."))
     self._scc_m_toggle = BigParamControlSP(tr("slow for curves: map"), "SmartCruiseControlMap",
                                            description=tr("Slows for curves in map data, then resumes your set speed.\n" +
                                                           "Download maps in sunnylink first."))
+    # stored value is the index into curve_speed_profile.SCALES
+    self._curve_speed = BigMultiParamToggleSP(tr("curve speed"), "CurveSpeedProfile", [tr("gentle"), tr("normal"), tr("sporty")],
+                                              description=tr("How fast slow for curves takes turns.\n" +
+                                                             "Gentle slows more. Sporty slows less."))
     self._custom_acc_btn = BigButtonSP(tr("custom increments"))
     self._speed_limit_btn = BigButtonSP(tr("speed limit"))
 
-    for btn in [self._alpha_long_btn, self._custom_acc_btn, self._speed_limit_btn]:
+    for btn in [self._custom_acc_btn, self._speed_limit_btn]:
       btn.set_subtitle_font_size(24)
 
     self._scroller.add_widgets([
-      self._alpha_long_btn,
-      self._scc_v_toggle, self._scc_m_toggle,
+      *self._alpha_long.items,
+      self._scc_v_toggle, self._scc_m_toggle, self._curve_speed,
       self._speed_limit_btn, self._custom_acc_btn,
     ])
 
@@ -92,16 +95,17 @@ class CruiseLayoutMici(NavScroller):
                                     description=tr("How far holding + or - moves your set speed at each step."))
     self._acc_view = self._custom_acc_btn.link_sub_panel([self._custom_acc_toggle, self._acc_short, self._acc_long])
 
-    self._sl_mode = BigMultiParamToggleSP(tr("speed limit mode"), "SpeedLimitMode", SL_MODE_LABELS,
+    self._sl_mode = BigMultiParamToggleSP(tr("speed limit mode"), "SpeedLimitMode", SL_MODE_LABELS, off_index=0,
                                           description=tr("Assist: when the limit changes, press - or + to set your speed to match.\n" +
                                                          "Info and warn show the sign on a comma 3X only."))
     self._sl_mode.set_blocked_options(lambda: set() if ui_state.icbm_turn_on_allowed("SpeedLimitMode", True) else {SL_MODE_ASSIST})
-    self._sl_source = BigMultiParamToggleSP(tr("source"), "SpeedLimitPolicy", SL_SOURCE_LABELS,
-                                            description=tr("Car uses the signs your car reads. Map uses downloaded maps.\n" +
-                                                           "Car-first and map-first use the other when the first has none.\n" +
-                                                           "Combined uses the lower of the two.\n" +
-                                                           "On a Mazda, car needs a nav SD card."))
-    self._sl_offset_type = BigMultiParamToggleSP(tr("offset type"), "SpeedLimitOffsetType", [tr("none"), tr("fixed"), "%"],
+    self._sl_source = BigMultiParamToggleSP(tr("source"), "SpeedLimitPolicy", list(SL_SOURCE_LABELS.values()), values=list(SL_SOURCE_LABELS),
+                                            description=tr("Auto follows the limit your car shows, and the map where it shows none.\n" +
+                                                           "The map also slows you before a lower limit ahead.\n" +
+                                                           "Car or map uses only that one."))
+    # cars that report no limit always use the map
+    self._sl_source.set_visible(lambda: car_shows_limit(ui_state.CP, ui_state.CP_SP))
+    self._sl_offset_type = BigMultiParamToggleSP(tr("offset type"), "SpeedLimitOffsetType", [tr("none"), tr("fixed"), "%"], off_index=0,
                                                  description=tr("Adds an offset to the speed limit.\n" +
                                                                 "Fixed adds a set amount of speed. % adds a percentage of the limit."))
     self._sl_offset_value = BigParamOption(tr("offset value"), "SpeedLimitValueOffset",
@@ -109,19 +113,26 @@ class CruiseLayoutMici(NavScroller):
                                            description=tr("The amount added to the speed limit. Negative values go below it."))
     self._sl_view = self._speed_limit_btn.link_sub_panel([self._sl_mode, self._sl_source, self._sl_offset_type, self._sl_offset_value])
 
+  def show_event(self):
+    super().show_event()
+    self._alpha_long.refresh()
+
   def _update_state(self):
     super()._update_state()
+    self._alpha_long.update_state()
 
     self._scc_v_toggle.refresh()
     self._scc_m_toggle.refresh()
+    self._curve_speed.refresh()
 
     cp_ready = ui_state.CP is not None and ui_state.CP_SP is not None
     has_long = cp_ready and ui_state.has_longitudinal_control
     has_icbm = cp_ready and ui_state.has_icbm
 
-    self._alpha_long_btn.set_enabled(alpha_longitudinal_reachable(ui_state))
     for toggle in (self._scc_v_toggle, self._scc_m_toggle):
       toggle.set_superseded(not (has_long or has_icbm))
+    # nothing reads it with both curve features off
+    self._curve_speed.set_superseded(not (has_long or has_icbm) or not (self._scc_v_toggle._checked or self._scc_m_toggle._checked))
     # has_long and has_icbm are False until CP is ready, so CP is not read before then
     custom_acc_available = (has_long and not ui_state.CP.pcmCruise) or has_icbm
     self._custom_acc_toggle.set_superseded(not custom_acc_available)
@@ -142,12 +153,6 @@ class CruiseLayoutMici(NavScroller):
       long_val = ACC_LONG_PRESS_MAP.get(long_raw, long_raw)
       self._custom_acc_btn.set_badges([(f"{short_val}{unit}", "on"), (f"{long_val}{unit}", "on")])
 
-    # Alpha longitudinal button subtitle: the mode that drives
-    if labels := longitudinal_mode_labels(ui_state):
-      self._alpha_long_btn.set_badges([(label, "on") for label in labels])
-    else:
-      self._alpha_long_btn.set_disabled()
-
     # Speed limit button subtitle
     sl_mode_idx = ui_state.params.get("SpeedLimitMode", return_default=True) or 0
     sl_mode = SL_MODE_LABELS[min(sl_mode_idx, len(SL_MODE_LABELS) - 1)]
@@ -155,12 +160,13 @@ class CruiseLayoutMici(NavScroller):
     if sl_mode_idx == SL_MODE_OFF:
       self._speed_limit_btn.set_disabled()
     else:
-      sl_source_idx = ui_state.params.get("SpeedLimitPolicy", return_default=True) or 0
-      sl_source = SL_SOURCE_LABELS[min(sl_source_idx, len(SL_SOURCE_LABELS) - 1)]
+      sl_source = SL_SOURCE_LABELS.get(ui_state.params.get("SpeedLimitPolicy", return_default=True), SL_SOURCE_LABELS[AUTO])
       sl_offset_val = ui_state.params.get("SpeedLimitValueOffset", return_default=True) or 0
       unit = "%" if offset_type == 2 else (speed_unit() if offset_type == 1 else "")
       icbm = icbm_moves_speed_limits(has_long, has_icbm, sl_mode_idx)
-      badges = [(sl_mode, "on"), (tr("icbm"), "on" if icbm else "off"), (sl_source, "on")]
+      badges = [(sl_mode, "on"), (tr("icbm"), "on" if icbm else "off")]
+      if car_shows_limit(ui_state.CP, ui_state.CP_SP):
+        badges.append((sl_source, "on"))
       if unit:
         sign = "+" if sl_offset_val > 0 else ""
         badges.append((f"{sign}{sl_offset_val}{unit}", "on"))

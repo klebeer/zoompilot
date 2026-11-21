@@ -6,6 +6,7 @@ See the LICENSE.md file in the root directory for more details.
 """
 
 from opendbc.car.structs import car
+from opendbc.sunnypilot.car.interfaces import has_bsm
 from openpilot.selfdrive.ui.sunnypilot.mici.widgets.button import (
   BigButtonSP,
   BigMultiParamToggleSP,
@@ -13,18 +14,24 @@ from openpilot.selfdrive.ui.sunnypilot.mici.widgets.button import (
   BigParamOption,
   speed_unit,
 )
+from openpilot.system.ui.sunnypilot.lib.switch import Switch
 from openpilot.system.ui.lib.multilang import tr
 from openpilot.system.ui.widgets.scroller import NavScroller
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.sunnypilot.mads.helpers import MadsSteeringModeOnBrake, get_mads_limited_brands
 from openpilot.sunnypilot.selfdrive.controls.lib.auto_lane_change import AUTO_LANE_CHANGE_TIMER, AutoLaneChangeMode
 from openpilot.sunnypilot.selfdrive.controls.lib.lane_change_smoothing import LEVEL_OFF, read_level
+from openpilot.sunnypilot.selfdrive.controls.lib.relc import RoadEdgeMode, read_road_edge_mode
 from openpilot.sunnypilot.selfdrive.controls.lib.torque_tune import TUNE_PARAM_BY_SIZE, jerk_aware_has_effect, versions_by_label
 from openpilot.system.ui.lib.application import gui_app
 
 MADS_STEERING_MODE_LABELS = [tr("remain"), tr("pause"), tr("disengage")]
+# the engagement tile's pill for each MadsSteeringMode
+MADS_BRAKE_BADGES = [tr("brake: remain"), tr("brake: pause"), tr("brake: off")]
 # LaneChangeSmoothing stores the index into this list (lane_change_smoothing.LEVELS order, off first)
 LC_LEVEL_LABELS = [tr("off"), tr("fast"), tr("medium"), tr("slow"), tr("extra slow")]
+# RoadEdgeLaneChangeEnabled stores the index into this list (relc.RoadEdgeMode)
+ROAD_EDGE_LABELS = [tr("off"), tr("audible"), tr("silent")]
 
 # Keys match the stored modes, including -1 for off. Reuse the controller's timer values.
 ALC_LABELS = {
@@ -59,7 +66,7 @@ class SteeringLayoutMici(NavScroller):
     self._torque_allowed = False
     self._enforce_torque = False
 
-    self._mads_settings_btn = BigButtonSP(tr("mads"))
+    self._mads_settings_btn = BigButtonSP(tr("when to steer"))
     self._lane_change_btn = BigButtonSP(tr("lane change"))
     self._blinker_settings_btn = BigButtonSP(tr("blinker pause"))
     self._torque_settings_btn = BigButtonSP(tr("torque control"))
@@ -76,18 +83,18 @@ class SteeringLayoutMici(NavScroller):
       self._torque_settings_btn, self._nnlc_toggle,
     ])
 
-    self._mads_toggle = BigParamControlSP(tr("enable mads"), "Mads",
+    self._mads_toggle = BigParamControlSP(tr("steer without cruise"), "Mads",
                                           description=tr("Lets zoompilot steer while cruise control is off.\n" +
                                                          "When off, steering and cruise engage and disengage together."))
     self._mads_toggle.set_enabled(ui_state.is_offroad)
     # Read the live toggle so dependent controls update in the same frame.
-    self._mads_main_cruise = BigParamControlSP(tr("main cruise toggle"), "MadsMainCruiseAllowed",
+    self._mads_main_cruise = BigParamControlSP(tr("steer when cruise on"), "MadsMainCruiseAllowed",
                                                depends_on=self._mads_engagement_applies,
-                                               description=tr("Turning cruise main on also turns steering on.\n" +
+                                               description=tr("Turning cruise on with its on/off button also turns steering on.\n" +
                                                               "Cars without a lane keep button need this on to steer."))
-    self._mads_unified = BigParamControlSP(tr("unified engagement"), "MadsUnifiedEngagementMode",
+    self._mads_unified = BigParamControlSP(tr("steer when cruise set"), "MadsUnifiedEngagementMode",
                                            depends_on=self._mads_engagement_applies,
-                                           description=tr("Engaging cruise also turns steering on.\n" +
+                                           description=tr("Setting or resuming a cruise speed also turns steering on.\n" +
                                                           "Steering then stays on until you switch it off or turn off the car."))
     # a limited platform fixes both, and the fixed values still apply
     for item in (self._mads_main_cruise, self._mads_unified):
@@ -100,7 +107,7 @@ class SteeringLayoutMici(NavScroller):
     # cruise and unified engagement stop touching MADS. Fingerprint cannot tell, so ask.
     self._mads_tja = BigParamControlSP(tr("tja button"), "MazdaTjaButton", depends_on=lambda: self._mads_toggle._checked,
                                        description=tr("The wheel's TJA button becomes the only steering switch.\n" +
-                                                      "The MRCC main button then only controls cruise.\n" +
+                                                      "The MRCC button then only controls cruise.\n" +
                                                       "Turn on only if your car has the button."))
     self._mads_tja.set_enabled(ui_state.is_offroad)
     self._mads_tja.set_visible(self._is_mazda)
@@ -109,35 +116,35 @@ class SteeringLayoutMici(NavScroller):
 
     # AutoLaneChangeTimer stores a mode from -1 through 5, not a boolean.
     self._lc_timer = BigMultiParamToggleSP(tr("auto lane change"), "AutoLaneChangeTimer",
-                                           list(ALC_LABELS.values()), values=list(ALC_LABELS),
+                                           list(ALC_LABELS.values()), values=list(ALC_LABELS), off_index=0,
                                            description=tr("Nudge: signal, then nudge the wheel to change lanes.\n" +
                                                           "Nudgeless changes lanes as soon as you signal. A time waits that long first.\n" +
                                                           "Off: zoompilot never changes lanes."))
     self._lc_bsm = BigParamControlSP(tr("bsm delay"), "AutoLaneChangeBsmDelay",
                                      depends_on=lambda: self._bsm_applies(self._alc_val) and self._car_has_bsm(),
                                      description=tr("Waits an extra second after the blind spot clears."))
-    self._lc_road_edge = BigParamControlSP(tr("road edge block"), "RoadEdgeLaneChangeEnabled",
-                                           description=tr("Blocks a lane change toward a road edge the model sees."))
+    self._lc_road_edge = BigMultiParamToggleSP(tr("road edge block"), "RoadEdgeLaneChangeEnabled", ROAD_EDGE_LABELS, off_index=0,
+                                               description=tr("Blocks a lane change toward a road edge the model sees.\n" +
+                                                              "Silent shows the alert without the chime."))
     # off = stock; every level is a slower lane change than stock
-    self._lc_level = BigMultiParamToggleSP(tr("lane change") + "\n" + tr("smoothing"), "LaneChangeSmoothing", LC_LEVEL_LABELS,
+    self._lc_level = BigMultiParamToggleSP(tr("lane change") + "\n" + tr("smoothing"), "LaneChangeSmoothing", LC_LEVEL_LABELS, off_index=0,
                                            description=tr("Makes lane changes slower and smoother.\n" +
                                                           "Off is stock. Every other pace is slower."))
     self._lc_view = self._lane_change_btn.link_sub_panel([self._lc_timer, self._lc_bsm, self._lc_road_edge,
                                                           self._lc_level])
 
-    self._blinker_toggle = BigParamControlSP(tr("enable blinker pause"), "BlinkerPauseLateralControl",
-                                             description=tr("Pauses steering while you signal at low speed, so you can turn by hand."))
-    self._blinker_speed = BigParamOption(tr("blinker speed"), "BlinkerMinLateralControlSpeed",
-                                         min_value=0, max_value=255, value_change_step=5,
-                                         label_callback=lambda v: f"{v} {speed_unit()}", picker_unit=speed_unit,
-                                         description=tr("Below this speed, the blinker pauses steering."))
+    # BlinkerPauseLateralControl is the picker's off; the speed is stored in the display unit
+    self._blinker_speed = BigParamOption(tr("blinker pauses steering"), "BlinkerMinLateralControlSpeed",
+                                         min_value=5, max_value=255, value_change_step=5,
+                                         label_callback=lambda v: tr("under {} {}").format(v, speed_unit()), picker_unit=speed_unit,
+                                         switch=Switch("BlinkerPauseLateralControl", False, tr("off")),
+                                         description=tr("Pauses steering while you signal below this speed, so you can turn by hand."))
     self._blinker_delay = BigParamOption(tr("blinker delay"), "BlinkerLateralReengageDelay",
                                          min_value=0, max_value=10,
                                          label_callback=lambda v: f"{v} " + tr("seconds"), picker_unit=tr("seconds"),
                                          description=tr("How long steering waits to resume after the blinker turns off."))
-    for opt in (self._blinker_speed, self._blinker_delay):
-      opt.set_enabled(lambda: self._blinker_toggle._checked)
-    self._blinker_view = self._blinker_settings_btn.link_sub_panel([self._blinker_toggle, self._blinker_speed, self._blinker_delay])
+    self._blinker_delay.set_enabled(lambda: not self._blinker_speed.switched)
+    self._blinker_view = self._blinker_settings_btn.link_sub_panel([self._blinker_speed, self._blinker_delay])
 
     self._torque_toggle = BigParamControlSP(tr("enable torque control"), "EnforceTorqueControl",
                                             description=tr("Steers with torque control, using zoompilot's tunes.\n" +
@@ -220,23 +227,24 @@ class SteeringLayoutMici(NavScroller):
 
     self._nnlc_toggle.refresh()
 
-    # an angle car's torque params are cleared by ui_state's _enforce_constraints
+    # an angle or curvature car's torque params are cleared by ui_state's _enforce_constraints
     torque_allowed = self._torque_allowed = (ui_state.CP is not None and
-                                             ui_state.CP.steerControlType != car.CarParams.SteerControlType.angle)
+                                             ui_state.CP.steerControlType == car.CarParams.SteerControlType.torque)
 
     mads_on = ui_state.params.get_bool("Mads")
     offroad = ui_state.is_offroad()
     self._mads_settings_btn.set_enabled(offroad)
     if not mads_on:
-      self._mads_settings_btn.set_disabled()
+      self._mads_settings_btn.set_value(tr("tied to cruise"))
     else:
-      cruise = _on_off(ui_state.params.get_bool("MadsMainCruiseAllowed"))
-      unified = _on_off(ui_state.params.get_bool("MadsUnifiedEngagementMode"))
+      # pills name what turns steering on, then what the brake does; the TJA button replaces the cruise ones
+      tja = self._is_mazda() and ui_state.params.get_bool("MazdaTjaButton")
+      cruise = _on_off(not tja and ui_state.params.get_bool("MadsMainCruiseAllowed"))
+      unified = _on_off(not tja and ui_state.params.get_bool("MadsUnifiedEngagementMode"))
       steer_idx = ui_state.params.get("MadsSteeringMode", return_default=True) or 0
-      steer_mode = MADS_STEERING_MODE_LABELS[min(steer_idx, len(MADS_STEERING_MODE_LABELS) - 1)]
-      badges = [(tr("enabled"), "on"), (tr("main-cruise"), cruise), (tr("unified"), unified), (steer_mode, "on")]
-      if self._is_mazda():
-        badges.append((tr("tja"), _on_off(ui_state.params.get_bool("MazdaTjaButton"))))
+      brake = MADS_BRAKE_BADGES[min(steer_idx, len(MADS_BRAKE_BADGES) - 1)]
+      badges = [(tr("cruise on"), cruise), (tr("cruise set"), unified),
+                (tr("tja"), _on_off(tja)), (brake, "on")]
       self._mads_settings_btn.set_badges(badges)
 
     blinker_on = ui_state.params.get_bool("BlinkerPauseLateralControl")
@@ -250,7 +258,7 @@ class SteeringLayoutMici(NavScroller):
     alc_val = self._alc_val = int(ui_state.params.get("AutoLaneChangeTimer", return_default=True) or AutoLaneChangeMode.NUDGE)
     # Hide the BSM delay when inactive without discarding the stored preference.
     lc_bsm = _on_off(ui_state.params.get_bool("AutoLaneChangeBsmDelay") and self._bsm_applies(alc_val))
-    road_edge = _on_off(ui_state.params.get_bool("RoadEdgeLaneChangeEnabled"))
+    road_edge = _on_off(read_road_edge_mode(ui_state.params) != RoadEdgeMode.OFF)
     lc_level = read_level(ui_state.params)
     if alc_val <= AutoLaneChangeMode.OFF and lc_bsm == "off" and road_edge == "off" and lc_level == LEVEL_OFF:
       self._lane_change_btn.set_disabled()
@@ -312,7 +320,7 @@ class SteeringLayoutMici(NavScroller):
 
   @staticmethod
   def _car_has_bsm() -> bool:
-    return ui_state.CP is not None and ui_state.CP.enableBsm
+    return ui_state.CP is not None and has_bsm(ui_state.CP, ui_state.CP_SP)
 
   def _update_torque_state(self, self_tune_on: bool, custom_on: bool):
     # Controls refresh themselves; the parent only maintains summary badges.

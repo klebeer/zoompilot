@@ -14,8 +14,7 @@ from openpilot.cereal import messaging
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS
 from openpilot.selfdrive.controls.radard import RADAR_TO_CAMERA
 from openpilot.sunnypilot.selfdrive.car.tests.fakes import FakeParams
-from openpilot.sunnypilot.selfdrive.controls.lib.dec.tests.test_dec_planner_gate import V_EGO, build_planner, build_sm
-from openpilot.sunnypilot.selfdrive.controls.lib.e2e_lead_gap.controller import Inhibit as GapInhibit
+from openpilot.sunnypilot.selfdrive.controls.lib.tests.test_experimental_gate import V_EGO, build_planner, build_sm
 from openpilot.sunnypilot.selfdrive.controls.lib.lead_forecast.forecast import LEAD_T_IDXS, Inhibit, forecast_trajectory
 
 SLOWING = np.array([V_EGO - 2., V_EGO - 6., V_EGO - 10., V_EGO - 12., V_EGO - 13., V_EGO - 13.])
@@ -23,7 +22,7 @@ D_REL = 40.
 
 
 def lead_sm():
-  sm = build_sm(experimental_mode=True)
+  sm = build_sm()
   rs = messaging.new_message('radarState').radarState
   rs.leadOne.present = True
   rs.leadOne.dRel = D_REL
@@ -47,13 +46,18 @@ def lead_sm():
   return sm
 
 
-def run(enabled: bool, frames: int = 20):
-  planner = build_planner(dec_active=False, dec_mode='acc')
-  planner.lead_forecast.params = FakeParams(LeadForecast=enabled)
+def run(enabled: bool, frames: int = 20, radar: bool | None = None):
+  """radar None: a camera lead; True/False: a radar track with LeadForecastRadar on/off."""
+  planner = build_planner()
+  planner.lead_forecast.params = FakeParams(LeadForecast=enabled, LeadForecastRadar=bool(radar))
   planner.lead_forecast.frame = -1  # re-read the param on the next update
-  planner.e2e_lead_gap.params = FakeParams(ExperimentalModeLeadGap=enabled)
-  planner.e2e_lead_gap.frame = -1
   sm = lead_sm()
+  if radar is not None:
+    rs = sm['radarState'].as_builder()
+    rs.leadOne.radar = True
+    rs.leadOne.radarTrackId = 3
+    rs.leadOne.aLeadTau = 1.5
+    sm['radarState'] = rs.as_reader()
   for _ in range(frames):
     planner.update(sm)
   return planner, sm
@@ -72,7 +76,6 @@ def test_off_reaches_the_mpc_as_upstream():
   report = publish(planner, sm)
   assert report.leadForecast.leadOne.inhibit == Inhibit.disabled
   assert report.leadForecast.leadOne.weight == 0.
-  assert report.e2eLeadGap.inhibit == GapInhibit.disabled
 
 
 def test_on_reaches_the_mpc():
@@ -86,7 +89,15 @@ def test_on_reaches_the_mpc():
   assert planner.mpc.a_solution[:6].min() < off.mpc.a_solution[:6].min() - 0.1
 
 
-def test_lead_gap_reports_why_it_idles():
-  planner, sm = run(True)
-  # the lead's forecast slows by far more than LEAD_SLOWDOWN
-  assert publish(planner, sm).e2eLeadGap.inhibit == GapInhibit.leadBraking
+def test_radar_lead_off_is_upstream():
+  planner, sm = run(True, radar=False)
+  lead = publish(planner, sm).leadForecast.leadOne
+  assert lead.inhibit == Inhibit.radar and lead.weight == 0.
+
+
+def test_radar_lead_on_reaches_the_mpc():
+  off, _ = run(True, radar=False)
+  planner, sm = run(True, radar=True)
+  lead = publish(planner, sm).leadForecast.leadOne
+  assert lead.inhibit == Inhibit.none and lead.weight == pytest.approx(1.)
+  assert planner.mpc.a_solution[:6].min() < off.mpc.a_solution[:6].min() - 0.1

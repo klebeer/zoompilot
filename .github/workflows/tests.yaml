@@ -45,11 +45,17 @@ jobs:
       with:
         timeout_minutes: 2
         max_attempts: 3
-        command: git lfs pull
+        command: ./lfs.py pull
     - name: Build devel
       timeout-minutes: 3
       run: TARGET_DIR=$STRIPPED_DIR tools/release/build_stripped.sh
     - run: ./tools/op.sh setup
+    - name: Restore scons cache
+      uses: actions/cache@v6
+      with:
+        path: /tmp/scons_cache
+        key: scons-${{ runner.os }}-${{ github.job }}-${{ github.sha }}
+        restore-keys: scons-${{ runner.os }}-${{ github.job }}-
     - name: Build openpilot and run checks
       timeout-minutes: 30
       working-directory: ${{ env.STRIPPED_DIR }}
@@ -89,8 +95,14 @@ jobs:
         FILTERED=$(echo "$PATH" | tr ':' '\n' | grep -v '/opt/homebrew' | tr '\n' ':')
         echo "PATH=${FILTERED}/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" >> $GITHUB_ENV
     - run: ./tools/op.sh setup
+    - name: Restore scons cache
+      uses: actions/cache@v6
+      with:
+        path: /tmp/scons_cache
+        key: scons-${{ runner.os }}-${{ github.job }}-${{ github.sha }}
+        restore-keys: scons-${{ runner.os }}-${{ github.job }}-
     - name: Building openpilot
-      run: scons
+      run: tools/op.sh build
 
   static_analysis:
     name: static analysis
@@ -121,8 +133,14 @@ jobs:
     - name: Install raylib headless dependencies
       if: ${{ !contains(runner.name, 'nsc') }}
       run: sudo apt-get install -y --no-install-recommends libgles2 libegl1
+    - name: Restore scons cache
+      uses: actions/cache@v6
+      with:
+        path: /tmp/scons_cache
+        key: scons-${{ runner.os }}-${{ github.job }}-${{ github.sha }}
+        restore-keys: scons-${{ runner.os }}-${{ github.job }}-
     - name: Build openpilot
-      run: scons
+      run: tools/op.sh build
     - name: Run unit tests
       timeout-minutes: ${{ contains(runner.name, 'nsc') && 2 || 999 }}
       env:
@@ -140,6 +158,12 @@ jobs:
     steps:
     - uses: actions/checkout@v7
     - run: ./tools/op.sh setup
+    - name: Restore scons cache
+      uses: actions/cache@v6
+      with:
+        path: /tmp/scons_cache
+        key: scons-${{ runner.os }}-${{ github.job }}-${{ github.sha }}
+        restore-keys: scons-${{ runner.os }}-${{ github.job }}-
     - name: Build openpilot
       run: scons
     - name: Run replay
@@ -228,6 +252,12 @@ jobs:
       - name: Install raylib headless dependencies
         if: ${{ !contains(runner.name, 'nsc') }}
         run: sudo apt-get install -y --no-install-recommends libgles2 libegl1
+      - name: Restore scons cache
+        uses: actions/cache@v6
+        with:
+          path: /tmp/scons_cache
+          key: scons-${{ runner.os }}-${{ github.job }}-${{ github.sha }}
+          restore-keys: scons-${{ runner.os }}-${{ github.job }}-
       - name: Build openpilot
         run: scons
       - name: Create UI Report

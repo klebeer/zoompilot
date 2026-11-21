@@ -4,7 +4,8 @@ Copyright (c) 2021-, Haibin Wen, sunnypilot, and a number of other contributors.
 This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 """
-from openpilot.selfdrive.ui.onroad.augmented_road_view import BORDER_COLORS
+# the sunnypilot colors directly: the merged BORDER_COLORS module imports the tizi HUD, a cycle for it
+from openpilot.selfdrive.ui.sunnypilot.onroad.augmented_road_view import BORDER_COLORS_SP as BORDER_COLORS
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
 
 
@@ -18,9 +19,6 @@ class ConfidenceBallSP:
     return ui_state.sm['modelV2'].meta.disengagePredictions.brakeDisengageProbs
 
   @staticmethod
-  def get_lat_long_dot_color():
-    if ui_state.status == UIStatus.LAT_ONLY:
-      return BORDER_COLORS[UIStatus.LAT_ONLY]
-
-    # UIStatus.LONG_ONLY
-    return BORDER_COLORS[UIStatus.LONG_ONLY]
+  def get_lat_long_dot_colors():
+    """The MADS lateral-only and longitudinal-only dot colors, for the status fade."""
+    return BORDER_COLORS[UIStatus.LAT_ONLY], BORDER_COLORS[UIStatus.LONG_ONLY]

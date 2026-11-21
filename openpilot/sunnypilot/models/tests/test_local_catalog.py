@@ -1,14 +1,15 @@
 import json
 
 from openpilot.sunnypilot.models import fetcher
+from openpilot.sunnypilot.models.helpers import REQUIRED_JSON_VERSION
 
 
 def bundle(ref, name="NNMV2FT", index=1000):
   return {"short_name": name, "display_name": f"{name} model", "is_20hz": True, "is_big": False, "ref": ref, "environment": "local",
-          "runner": "tinygrad", "index": index, "minimum_selector_version": "19", "generation": "12",
+          "runner": "tinygrad", "index": index, "minimum_selector_version": str(REQUIRED_JSON_VERSION), "generation": "12",
           "overrides": {"folder": "Local Models", "lat": ".1", "long": ".3"},
-          "models": [{"type": "chunked", "artifact": {"file_name": f"{name.lower()}.pkl", "download_uri": {"url": "", "sha256": ""},
-                                                      "chunks": [{"file_name": f"{name.lower()}.pkl.chunk01of01", "sha256": "ab" * 32}]}}]}
+          "models": [{"type": "chunked", "artifact": {"file_name": f"{name.lower()}.pkl",
+                                                      "download_uri": {"url": "", "sha256": "ab" * 32}}}]}
 
 
 def use_catalog(tmp_path, monkeypatch, content):
@@ -26,7 +27,6 @@ def test_local_bundles_are_listed_for_the_small_model_only(tmp_path, monkeypatch
   assert [(b.ref, b.displayName) for b in local] == [("local-1", "NNMV2FT model")]
   assert {o.key: o.value for o in local[0].overrides}["lat"] == ".1"
   assert fetcher.local_bundles("chestnut") == []
-  assert (tmp_path / "nnmv2ft.pkl.chunkmanifest").read_text() == "1", "the manifest modeld reads is written as for remote bundles"
 
 
 def test_no_catalog_or_a_broken_one_lists_nothing(tmp_path, monkeypatch):

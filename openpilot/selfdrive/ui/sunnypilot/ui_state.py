@@ -8,6 +8,7 @@ from enum import Enum
 
 from openpilot.cereal import messaging, log, custom
 from opendbc.car.structs import car
+from opendbc.sunnypilot.car.interfaces import has_bsm
 from openpilot.common.params import Params
 from openpilot.selfdrive.ui.sunnypilot.layouts.settings.display import OnroadBrightness
 from openpilot.selfdrive.ui.sunnypilot.ui_state_zp import UIStateZP
@@ -37,7 +38,7 @@ class UIStateSP(UIStateZP):
     self.is_sp_release: bool = self.params.get_bool("IsReleaseSpBranch")
     self.sm_services_ext = [
       "modelManagerSP", "selfdriveStateSP", "longitudinalPlanSP", "backupManagerSP",
-      "gpsLocation", "lateralTorqueParameters", "carStateSP", "liveMapDataSP", "carParamsSP", "lateralDelay"
+      "lateralTorqueParameters", "carStateSP", "liveMapDataSP", "carParamsSP", "lateralDelay", "modelDataV2SP"
     ]
 
     self.sunnylink_state = SunnylinkState()
@@ -46,7 +47,9 @@ class UIStateSP(UIStateZP):
     self.screensaver_enabled: bool = False
 
     self.active_bundle = None
+    self.chestnut_downloading = False
     self.model_runner_tinygrad: bool = False
+    self.active_runner_tinygrad: bool = False
     self.blindspot: bool = False
     self.chevron_metrics = None
     self.custom_interactive_timeout: int = 0
@@ -113,6 +116,14 @@ class UIStateSP(UIStateZP):
     return self.onroad_brightness in (OnroadBrightness.AUTO, OnroadBrightness.AUTO_DARK)
 
   @staticmethod
+  def lateral_active(_ui_state) -> bool:
+    if _ui_state.sm.valid["selfdriveStateSP"]:
+      mads = _ui_state.sm["selfdriveStateSP"].mads
+      if mads.available:
+        return mads.enabled and mads.state != MADSState.paused and not _ui_state.sm["selfdriveStateSP"].zoompilot.madsLateralHeld
+    return _ui_state.status.value in ("engaged", "lat_only")
+
+  @staticmethod
   def update_status(ss, ss_sp, onroad_evt) -> str:
     state = ss.state
     mads = ss_sp.mads
@@ -161,9 +172,13 @@ class UIStateSP(UIStateZP):
                                chestnut_loading=self.chestnut_loading, offroad=self.is_offroad())
     self.active_bundle = self.params.get(ACTIVE_BUNDLE_KEYS[source])
     self.model_runner_tinygrad = self.active_bundle is not None and self.active_bundle.get("runner") == "tinygrad"
+    # runner the manager launches (process_config.is_tinygrad_model); with a chestnut the big slot decides
+    self.active_runner_tinygrad = self.params.get("ModelRunnerTypeCache") == custom.ModelManagerSP.Runner.tinygrad
     # stock only counts the default big model's compiled pkl. a downloaded big bundle runs on the
-    # chestnut just the same, so ChestnutState has to see it as available too.
+    # chestnut just the same, so ChestnutState has to see it as available too
     self.chestnut_compiled = self.chestnut_compiled or self.model_runner_tinygrad
+    # the model manager downloading the chestnut's model, which the chestnut icon shows as loading
+    self.chestnut_downloading = self.params.get("Offroad_ChestnutModelDownloading") is not None
     UIStateZP.update_params(self)
     self.blindspot = self.params.get_bool("BlindSpot")
     self.chevron_metrics = self.params.get("ChevronInfo")
@@ -195,7 +210,6 @@ class UIStateSP(UIStateZP):
       self.reset_onroad_sleep_timer()
 
   def _enforce_constraints(self) -> None:
-    has_long = self.has_longitudinal_control
     CP = self.CP
 
     if CP is not None:
@@ -207,8 +221,8 @@ class UIStateSP(UIStateZP):
         self.params.put_bool("LateralJerkTorqueController", False, block=True)
         self.params.put_bool("NeuralNetworkLateralControl", False, block=True)
 
-      # Angle steering: no torque-based lateral controls
-      if CP.steerControlType == car.CarParams.SteerControlType.angle:
+      # Angle or curvature steering: no torque-based lateral controls
+      if CP.steerControlType != car.CarParams.SteerControlType.torque:
         self.params.remove("EnforceTorqueControl")
         self.params.remove("NeuralNetworkLateralControl")
         self.params.remove("LateralJerkTorqueController")
@@ -218,7 +232,7 @@ class UIStateSP(UIStateZP):
         self.params.remove("AlphaLongitudinalEnabled")
 
       # BSM not available: clear BSM-dependent settings
-      if not CP.enableBsm:
+      if not has_bsm(CP, self.CP_SP):
         self.params.remove("AutoLaneChangeBsmDelay")
     else:
       # Clear car-dependent params only offroad. During first-drive initialization, card may
@@ -229,10 +243,8 @@ class UIStateSP(UIStateZP):
         self.params.remove("LateralJerkTorqueController")
         self.params.remove("AlphaLongitudinalEnabled")
 
-    # No longitudinal control: no experimental mode. DEC, speed assist, custom ACC and
-    # SCC keep their values; card and the planner leave them idle until long or ICBM returns.
-    if not has_long:
-      self.params.remove("ExperimentalMode")
+    # Experimental mode, speed assist, custom ACC and SCC keep their values without longitudinal
+    # control; selfdrived, card and the planner leave them idle until long or ICBM returns.
 
     # ICBM has no toggle: the features that act through it can, wherever the car has it
     self.has_icbm = self.CP is not None and self.CP_SP is not None and icbm_applicable(self.CP, self.CP_SP)
@@ -274,13 +286,18 @@ class DeviceSP:
     self._blocked_by_screensaver = False
 
   @staticmethod
-  def set_onroad_brightness(_ui_state, awake: bool, cur_brightness: float) -> float:
+  def set_onroad_brightness(_ui_state, awake: bool, cur_brightness: float, auto_floor: float, backlight_min: float) -> float:
+    """The onroad brightness setting applied to the auto brightness. auto_floor is upstream's own lowest
+    auto level: an alert never shows darker than that, whatever the setting or the timer."""
     if not awake or not _ui_state.started:
       return cur_brightness
 
+    if _ui_state.sm['selfdriveState'].alertSize != log.SelfdriveState.AlertSize.none:
+      return max(auto_floor, cur_brightness)
+
     if _ui_state.onroad_brightness_timer != 0:
       if _ui_state.onroad_brightness == OnroadBrightness.AUTO_DARK:
-        return max(30.0, cur_brightness)
+        return max(backlight_min, cur_brightness)
       return cur_brightness
 
     # 0: Auto (Default), 1: Auto (Dark), 2: Screen Off
@@ -295,7 +312,19 @@ class DeviceSP:
     return float((_ui_state.onroad_brightness - 2) * 5)
 
   @staticmethod
-  def set_min_onroad_brightness(_ui_state, min_brightness: int) -> int:
+  def backlight_and_dim(brightness: float, backlight_min: float, dims: bool) -> tuple[int, float]:
+    """(backlight, UI dim) for a brightness. Where upstream dims the UI below the backlight's floor (mici,
+    whose panel can't show a lower backlight), sunnypilot's darker settings do the same. Elsewhere (tizi,
+    which upstream never dims) they drive the backlight itself, without drawing a full-screen overlay every
+    frame. 0 is screen off: the backlight off, nothing to dim."""
+    if brightness <= 0:
+      return 0, 0.0
+    if dims:
+      return round(max(brightness, backlight_min)), max(0.0, 1 - brightness / backlight_min)
+    return round(brightness), 0.0
+
+  @staticmethod
+  def set_min_onroad_brightness(_ui_state, min_brightness: float) -> float:
     if _ui_state.onroad_brightness == OnroadBrightness.AUTO_DARK:
       min_brightness = 10
 

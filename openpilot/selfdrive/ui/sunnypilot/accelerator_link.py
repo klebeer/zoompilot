@@ -33,9 +33,9 @@ def link_toggle_meaningful() -> bool:
   big model itself; and while the setting is on, whatever else. Presence
   cannot be the gate: with the link off there is no gadget for a Jetson to
   enumerate, so the toggle that turns it on would wait for the thing it enables."""
-  if ui_state.chestnut_present:
-    return False
-  return ui_state.jetlink is not None or link_mode() != "off"
+  if link_mode() != "off":
+    return True
+  return not ui_state.chestnut_present and ui_state.jetlink is not None
 
 
 def link_status() -> str:
@@ -47,13 +47,10 @@ def link_status() -> str:
   than claiming an empty port.
   """
   jetlink = ui_state.jetlink
-  if jetlink is None:
-    return ""
-  if jetlink.present:
+  port = jetlink.port_state if jetlink is not None else None
+  if port == "connected":
     return f"{tr('Jetlink connected:')} {jetlink.transport}."
-  if jetlink.port is None:
-    return ""
-  return tr("Nothing on the USB port.") if jetlink.port == "empty" else tr("A device is on the USB port.")
+  return {"empty": tr("Nothing on the USB port."), "device": tr("A device is on the USB port.")}.get(port, "")
 
 
 def big_model_progress() -> tuple[str, float, str] | None:

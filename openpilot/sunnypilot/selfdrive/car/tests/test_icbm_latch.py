@@ -129,9 +129,15 @@ class TestMigration:
     self._all_on(params)
     migrate_icbm_toggle(_cp(), _cp_sp(), params)
     assert not any(params.get_bool(k) for k in CONSUMER_KEYS)
-    assert params.get("SpeedLimitMode", return_default=True) == Mode.warning
-    assert not icbm_demanded(_cp(), params)
     assert params.get_bool(MIGRATED) and params.get(LEGACY_TOGGLE) is None
+
+  def test_stock_acc_keeps_speed_limit_assist(self, params):
+    # the old toggle off put assist back to warning at every start, so assist here was set
+    # on this build, before the first drive
+    params.put("SpeedLimitMode", int(Mode.assist), block=True)
+    migrate_icbm_toggle(_cp(), _cp_sp(), params)
+    assert params.get("SpeedLimitMode", return_default=True) == Mode.assist
+    assert icbm_demanded(_cp(), params)
 
   def test_toggle_off_alpha_long_keeps_what_the_planner_ran(self, params):
     self._all_on(params)
@@ -220,7 +226,9 @@ class TestCardHandover:
 class TestPlannerHandover:
   def _targets(self, planner, activation):
     cc = messaging.new_message('carControl').carControl
-    sm = {'carState': messaging.new_message('carState').carState, 'carControl': cc, 'carStateSP': _cs_sp(activation)}
+    gps = planner.scc.map.gps_location_service  # no fix: the map controller holds nothing
+    sm = {'carState': messaging.new_message('carState').carState, 'carControl': cc, 'carStateSP': _cs_sp(activation),
+          gps: getattr(messaging.new_message(gps), gps)}
     planner.update_targets(sm, 20., 0., 25.)
 
   def test_alpha_long_switches_sla_owner(self, params):

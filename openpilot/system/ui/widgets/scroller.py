@@ -1,4 +1,4 @@
-import pyray as rl
+import raylib_nb as rl
 import numpy as np
 from collections.abc import Callable, Sequence
 
@@ -97,6 +97,7 @@ class _Scroller(Widget):
     self._scroll_enabled: bool | Callable[[], bool] = True
 
     self._show_scroll_indicator = scroll_indicator and self._horizontal
+    self.scroll_indicator_start_after: Widget | None = None
     self._scroll_indicator = ScrollIndicator()
     self._edge_shadows = edge_shadows and self._horizontal
 
@@ -128,10 +129,6 @@ class _Scroller(Widget):
       self._scrolling_to = scroll_offset, block_interrupt, block_widget_interaction
     else:
       self.scroll_panel.set_offset(scroll_offset)
-
-  @property
-  def is_auto_scrolling(self) -> bool:
-    return self._scrolling_to[0] is not None
 
   @property
   def items(self) -> list[Widget]:
@@ -364,7 +361,14 @@ class _Scroller(Widget):
 
     # Draw scroll indicator on top of edge shadows
     if self._show_scroll_indicator and len(self._visible_items) > 0:
-      self._scroll_indicator.update(self._scroll_offset, self._content_size, self._rect)
+      viewport = self._rect
+      if self.scroll_indicator_start_after is not None:
+        offset = min(self._rect.width, max(0.0, self.scroll_indicator_start_after.rect.x
+                                           + self.scroll_indicator_start_after.rect.width
+                                           + self._spacing - self._rect.x))
+        viewport = rl.Rectangle(self._rect.x + offset, self._rect.y, self._rect.width - offset, self._rect.height)
+
+      self._scroll_indicator.update(self._scroll_offset, self._content_size, viewport)
       self._scroll_indicator.render()
 
   def show_event(self):

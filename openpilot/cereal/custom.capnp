@@ -81,7 +81,7 @@ struct SelfdriveStateSP @0x81c2f05a394cf4af {
     refuse @3;
 
     warningSoft @4;
-    warningImmediate @5;
+    warningImmediateSystem @5;
 
     prompt @6;
     promptRepeat @7;
@@ -90,7 +90,7 @@ struct SelfdriveStateSP @0x81c2f05a394cf4af {
     # unused, these are reserved for upstream events so we don't collide
     reserved9 @9;
     reserved10 @10;
-    reserved11 @11;
+    warningImmediateUser @11;
     reserved12 @12;
     reserved13 @13;
     reserved14 @14;
@@ -139,6 +139,9 @@ struct ModelManagerSP @0xaedffd8f31e7b55d {
     status @0 :DownloadStatus;
     progress @1 :Float32;
     eta @2 :UInt32;
+    speed @3 :Float32;
+    canceling @4 :Bool;
+    resuming @5 :Bool;
   }
 
   struct Chunk {
@@ -197,7 +200,6 @@ struct ModelManagerSP @0xaedffd8f31e7b55d {
 }
 
 struct LongitudinalPlanSP @0xf35cc4560bbf6ec2 {
-  dec @0 :DynamicExperimentalControl;
   longitudinalPlanSource @1 :LongitudinalPlanSource;
   smartCruiseControl @2 :SmartCruiseControl;
   speedLimit @3 :SpeedLimit;
@@ -207,7 +209,11 @@ struct LongitudinalPlanSP @0xf35cc4560bbf6ec2 {
   e2eAlerts @7 :E2eAlerts;
   zoompilot @8 :LongitudinalPlanZP;
 
-  struct DynamicExperimentalControl {
+  deprecated :group {
+    dec @0 :DynamicExperimentalControlDEPRECATED;
+  }
+
+  struct DynamicExperimentalControlDEPRECATED {
     state @0 :DynamicExperimentalControlState;
     enabled @1 :Bool;
     active @2 :Bool;
@@ -345,7 +351,7 @@ struct OnroadEventSP @0xda96579883444c35 {
     silentParkBrake @11;
     controlsMismatchLateral @12;
     hyundaiRadarTracksConfirmed @13;
-    experimentalModeSwitched @14;
+    experimentalModeSwitchedDEPRECATED @14;
     wrongCarModeAlertOnly @15;
     pedalPressedAlertOnly @16;
     laneTurnLeft @17;
@@ -468,7 +474,14 @@ struct ModelDataV2SP @0xa1680744031fdb2d {
   laneTurnDirection @0 :TurnDirection;
   leftLaneChangeEdgeBlock @1 :Bool;
   rightLaneChangeEdgeBlock @2 :Bool;
-  zoompilot @3 :ModelDataV2ZP;
+  blendfulCurvature @3 :Float32;
+  blendfulTrust @4 :Float32;
+  modelCurvature @5 :Float32;
+  blendfulGoingAround @6 :Bool;
+  blendfulLeftProb @7 :Float32;
+  blendfulRightProb @8 :Float32;
+  blendfulLaneWidth @9 :Float32;
+  zoompilot @10 :ModelDataV2ZP;
 
   enum TurnDirection {
     none @0;
@@ -516,6 +529,9 @@ struct CustomReserved19 @0xa4f1eb3323f5f582 {
   # points and only the restore path reads them (LiveTorqueParametersSP param)
   speedBinPoints @5 :List(List(List(Float32)));
   seedVersion @6 :Int32;           # speed_dependent.toml seed_version the bins were learned under; 0 before the field existed
+  # cache-only, empty on the published message and in a cache from before 2026-10-21
+  speedBinDecays @7 :List(Float32);  # per-bin filter decay
+  speedBinLearned @8 :List(Bool);    # the bin has been fit since its last reseed, whatever its points now
 }
 
 # ---- zoompilot -----------------------------------------------------------------------------
@@ -533,6 +549,8 @@ struct SelfdriveStateZP @0xde02074862680d1d {
   # large moves (interleaved with the wheel's own frames it registers as paced presses, never
   # as a held button). sendButton keeps the direction.
   icbmHold @1 :Bool;
+  # The retired ExperimentalMode param (chill mode went 2026-11); older logs only.
+  experimentalModeDEPRECATED @2 :Bool = true;
 }
 
 struct CarParamsZP @0x89825c62ea259087 {
@@ -587,6 +605,8 @@ struct OnroadEventZP @0xeff60a9f4d5cb12f {
     longitudinalEnableChime @8;
     longitudinalDisableChime @9;
     stockLkasArming @10;
+    stockCruiseFailed @11;
+    speedAssistSwitched @12;
   }
 }
 
@@ -660,13 +680,13 @@ struct CarControlZP @0xaadf9bc39b7bd41e {
 struct LongitudinalPlanZP @0xc3b0556e1118c2db {
   e2eSetSpeed @0 :E2ESetSpeed;
   leadForecast @1 :LeadForecast;
-  e2eLeadGap @2 :E2ELeadGap;
+  e2eLeadGap @2 :E2ELeadGap;  # retired 2026-10-27, folded into e2eSetSpeed; older logs only
   # lowest planned speed on the model horizon, m/s (smart cruise control vision); 0 = no
   # lookahead (feature off, long disabled, or no model), 255 caps "nothing binding ahead"
   sccVAheadMin @3 :Float32;
 
-  # Experimental mode's follow-distance assist (sunnypilot/selfdrive/controls/lib/e2e_lead_gap):
-  # what it added to the model's acceleration behind a lead and, when nothing, why.
+  # Experimental mode's follow-distance assist, retired 2026-10-27 (Set Speed Assist lifts toward the
+  # lead MPC too): what it added to the model's acceleration behind a lead and, when nothing, why.
   struct E2ELeadGap {
     authority @0 :Float32;     # 0..1, rate-limited
     gain @1 :Float32;          # 0..1 from the model's own acceleration
@@ -679,7 +699,7 @@ struct LongitudinalPlanZP @0xc3b0556e1118c2db {
       disabled @0;      # the ExperimentalModeLeadGap toggle is off (and logs from before it)
       none @1;
       inactive @2;      # not e2e, or long control reset
-      decActive @3;
+      decActive @3;     # retired 2026-10, older logs only
       invalid @4;
       hold @5;          # a trip cleared less than the hold time ago
       fcw @6;
@@ -718,38 +738,40 @@ struct LongitudinalPlanZP @0xc3b0556e1118c2db {
       disabled @0;      # the LeadForecast toggle is off (and logs from before it)
       none @1;
       noLead @2;
-      radar @3;         # a radar track: measured, keeps upstream's extrapolation
+      radar @3;         # a radar track with LeadForecastRadar off: keeps upstream's extrapolation
       invalid @4;
-      mismatch @5;      # radarState's lead is not the model's lead
+      mismatch @5;      # radarState's lead is not the model's lead (radar: off the track's range or speed)
     }
   }
 
-  # Experimental mode's set-speed floor (sunnypilot/selfdrive/controls/lib/e2e_set_speed):
+  # Experimental mode's Set Speed Assist (sunnypilot/selfdrive/controls/lib/e2e_set_speed):
   # what it added to the model's acceleration and, when nothing, why.
   struct E2ESetSpeed {
-    authority @0 :Float32;     # 1, or 0 while a hazard holds the boost off (0..1 rate-limited before 2026-10)
-    gain @1 :Float32;          # 0..1 from the model's own acceleration
-    floor @2 :Float32;         # m/s^2 the boost pulls toward
-    boost @3 :Float32;         # m/s^2 added to the model's acceleration
+    authority @0 :Float32;     # retired 2026-10-27; 1, or 0 while a hazard held the boost off
+    gain @1 :Float32;          # 0..1 from the model's own acceleration and throttle probability, and speed
+    floor @2 :Float32;         # m/s^2 the lift pulls toward: chill's answer, min(lead MPC, cruise)
+    boost @3 :Float32;         # m/s^2 added to the model's acceleration, never negative since 2026-10-27
     inhibit @4 :Inhibit;
-    bound @5 :Float32;         # m/s^2 the speed envelope allows
-    added @6 :Float32;         # m/s this controller has put on the car, handed back over the envelope
+    bound @5 :Float32;         # retired 2026-10-27; m/s^2 the speed envelope allowed
+    added @6 :Float32;         # retired 2026-10-27; m/s the envelope had put on the car
+    fade @7 :Float32;          # 0..1 from the bend ahead at the current speed
+    planFade @8 :Float32;      # 0..1 from the slowdown the plan or a closing lead sets over 10 s; caps gain
 
     enum Inhibit {
       disabled @0;      # the ExperimentalModeSetSpeed toggle is off (and logs from before it)
       none @1;
       inactive @2;      # not e2e, or long control reset
-      decActive @3;
+      decActive @3;     # retired 2026-10, older logs only
       invalid @4;
-      hold @5;          # a hazard cleared less than the hold time ago
-      fcw @6;
-      hardBrake @7;
-      forceDecel @8;
+      hold @5;          # retired 2026-10-27, older logs only
+      fcw @6;           # retired 2026-10-27, older logs only
+      hardBrake @7;     # retired 2026-10-27, older logs only
+      forceDecel @8;    # retired 2026-10-27, older logs only
       stop @9;          # retired 2026-10, older logs only (the envelope covers stops)
-      lead @10;
-      driver @11;       # gas or brake pressed
-      modelBraking @12; # gain at zero (a trip before 2026-10)
-      planSlowing @13;  # the envelope below the floor (a trip before 2026-10)
+      lead @10;         # retired 2026-10-27, older logs only
+      driver @11;       # retired 2026-10-27, older logs only
+      modelBraking @12; # retired 2026-10-27, older logs only
+      planSlowing @13;  # retired 2026-10-27, older logs only
       lateral @14;      # retired 2026-10, older logs only
       coast @15;        # retired 2026-10, older logs only
       laneChange @16;

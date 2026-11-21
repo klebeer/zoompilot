@@ -16,9 +16,25 @@ import openpilot.cereal.messaging as messaging
 from openpilot.cereal import custom
 from opendbc.car import structs
 from openpilot.common.test import OpenpilotTestCase
-from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlannerSP
+from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_planner import SCC_SOURCES, LongitudinalPlannerSP
+from openpilot.sunnypilot.selfdrive.controls.lib.smart_cruise_control.limits import OP_LONG_A_BUDGET
 
 LongitudinalPlanSource = custom.LongitudinalPlanSP.LongitudinalPlanSource
+
+
+def make_planner(op_long=True):
+  """A planner whose sources are mocked (they are exercised in their own tests; here only their
+  published pair matters), and the messages update_targets reads."""
+  cp = structs.CarParams(brand="mazda", openpilotLongitudinalControl=op_long, longitudinalActuatorDelay=0.36)
+  planner = LongitudinalPlannerSP(cp, structs.CarParamsSP(), MagicMock())
+  planner.scc.update = MagicMock()
+  planner.resolver.update = MagicMock()
+  planner.resolver.distance = 0.
+  planner.sla.update = MagicMock()
+  sm = {'carState': messaging.new_message('carState').carState,
+        'carControl': messaging.new_message('carControl').carControl,
+        'carStateSP': messaging.new_message('carStateSP').carStateSP}
+  return planner, sm
 
 
 class TestSeedGuard(OpenpilotTestCase):
@@ -27,16 +43,7 @@ class TestSeedGuard(OpenpilotTestCase):
     self.make()
 
   def make(self):
-    cp = structs.CarParams(brand="mazda", openpilotLongitudinalControl=True, longitudinalActuatorDelay=0.36)
-    self.planner = LongitudinalPlannerSP(cp, structs.CarParamsSP(), MagicMock())
-    # the sources are exercised in their own tests; here only their published pair matters
-    self.planner.scc.update = MagicMock()
-    self.planner.resolver.update = MagicMock()
-    self.planner.resolver.distance = 0.
-    self.planner.sla.update = MagicMock()
-    self.sm = {'carState': messaging.new_message('carState').carState,
-               'carControl': messaging.new_message('carControl').carControl,
-               'carStateSP': messaging.new_message('carStateSP').carStateSP}
+    self.planner, self.sm = make_planner()
 
   def test_finite_targets_pass_through(self):
     self.planner.scc.vision.output_v_target = 15.
@@ -70,6 +77,33 @@ class TestSeedGuard(OpenpilotTestCase):
     assert math.isfinite(v) and math.isfinite(a)
 
 
+class TestSeedNeverAboveThePlan(OpenpilotTestCase):
+  """On openpilot long a limiter may lower the seed below the plan's last output (a_ego), never
+  raise it above."""
+
+  def targets(self, op_long: bool, a_limiter: float, a_ego: float) -> float:
+    planner, sm = make_planner(op_long)
+    planner.scc.vision.output_v_target = 15.
+    planner.scc.vision.output_a_target = a_limiter
+    _, a = planner.update_targets(sm, 20., a_ego, 25.)
+    assert planner.source == LongitudinalPlanSource.sccVision
+    return a
+
+  def test_limiter_asking_less_decel_than_the_plan_has(self):
+    # braking at -2 behind a lead while a curve asks -0.3
+    assert self.targets(True, -0.3, -2.) == -2.
+
+  def test_limiter_asking_to_accelerate(self):
+    assert self.targets(True, 2., -1.5) == -1.5
+
+  def test_limiter_decel_below_the_plan_is_kept(self):
+    assert self.targets(True, -0.8, 0.) == -0.8
+
+  def test_stock_acc_wire_is_untouched(self):
+    # nothing is seeded from it there
+    assert self.targets(False, -0.3, -2.) == -0.3
+
+
 class TestSccNeedsLongOrIcbm:
   """SCC's params survive losing openpilot long and ICBM, so the planner keeps it idle there."""
 
@@ -93,3 +127,33 @@ class TestSccNeedsLongOrIcbm:
   def test_icbm_or_op_long_lets_scc_run(self):
     assert self._scc_enabled(op_long=False, pcm_cruise_speed=False)
     assert self._scc_enabled(op_long=True, pcm_cruise_speed=True)
+
+
+class TestLimiterDecel(OpenpilotTestCase):
+  """Upstream caps the cruise candidate at A_CRUISE_MIN; SCC keeps its own budget, SLA coasts."""
+
+  def make(self, source, v_target, v_ego=20., a_prev=-OP_LONG_A_BUDGET):
+    cp = structs.CarParams(brand="mazda", openpilotLongitudinalControl=True)
+    planner = LongitudinalPlannerSP(cp, structs.CarParamsSP(), MagicMock())
+    planner.source, planner.output_v_target = source, v_target
+    planner.v_ego, planner.a_cruise_prev = v_ego, a_prev
+    return planner
+
+  def test_scc_brakes_past_the_cruise_floor_to_its_budget(self):
+    for source in SCC_SOURCES:
+      assert self.make(source, 10.).update_cruise_accel(-0.5) == -OP_LONG_A_BUDGET
+
+  def test_jerk_limited_from_last_frame(self):
+    # a limiter appearing at full budget eases in from last frame's candidate
+    assert -0.1 < self.make(LongitudinalPlanSource.sccVision, 10., a_prev=0.).update_cruise_accel(0.) < 0.
+
+  def test_set_speed_drop_and_sla_keep_upstreams_floor(self):
+    for source in (LongitudinalPlanSource.cruise, LongitudinalPlanSource.speedLimitAssist):
+      assert self.make(source, 10.).update_cruise_accel(-0.5) == -0.5
+
+  def test_limiter_above_the_car_leaves_cruise_alone(self):
+    # a curve target above the car: the cruise candidate keeps accelerating toward it
+    assert self.make(LongitudinalPlanSource.sccVision, 22., v_ego=18., a_prev=0.5).update_cruise_accel(0.5) == 0.5
+
+  def test_never_raises_the_cruise_candidate(self):
+    assert self.make(LongitudinalPlanSource.sccMap, 19.8, a_prev=-0.5).update_cruise_accel(-0.5) == -0.5

@@ -7,7 +7,8 @@ See the LICENSE.md file in the root directory for more details.
 import json
 import math
 import platform
-
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 from openpilot.cereal import custom
 from openpilot.common.params import Params
@@ -26,12 +27,12 @@ class TestSmartCruiseControlMap(OpenpilotTestCase):
     self.mem_params = Params("/dev/shm/params") if platform.system() != "Darwin" else self.params
     self.reset_params()
     self.scc_m = SmartCruiseControlMap()
+    self.sm = MagicMock()
+    self.sm.__getitem__.return_value = SimpleNamespace(latitude=0.0, longitude=0.0)
 
   def reset_params(self):
     self.params.put_bool("SmartCruiseControlMap", True, block=True)
 
-    # TODO-SP: mock data from gpsLocation
-    self.params.put("LastGPSPosition", "{}", block=True)
     self.params.put("MapTargetVelocities", "{}", block=True)
 
   def test_initial_state(self):
@@ -45,7 +46,7 @@ class TestSmartCruiseControlMap(OpenpilotTestCase):
     self.scc_m.enabled = self.params.get_bool("SmartCruiseControlMap")
 
     for _ in range(int(10. / DT_MDL)):
-      self.scc_m.update(True, False, 0., 0., 0.)
+      self.scc_m.update(self.sm, True, False, 0., 0., 0.)
     assert self.scc_m.state == VisionState.disabled
     assert not self.scc_m.is_active
 
@@ -61,22 +62,22 @@ class TestSmartCruiseControlMap(OpenpilotTestCase):
 
     self.scc_m.mem_params = Recording()
     for _ in range(int(10. / DT_MDL)):
-      self.scc_m.update(True, False, 20., 0., 30.)
+      self.scc_m.update(self.sm, True, False, 20., 0., 30.)
     assert read == []
     assert self.scc_m.state == VisionState.disabled and self.scc_m.output_v_target == V_CRUISE_UNSET
 
     self.scc_m.enabled = True
-    self.scc_m.update(True, False, 20., 0., 30.)
+    self.scc_m.update(self.sm, True, False, 20., 0., 30.)
     assert "MapTargetVelocities" in read
 
   def test_disabled(self):
     for _ in range(int(10. / DT_MDL)):
-      self.scc_m.update(False, False, 0., 0., 0.)
+      self.scc_m.update(self.sm, False, False, 0., 0., 0.)
     assert self.scc_m.state == VisionState.disabled
 
   def test_transition_disabled_to_enabled(self):
     for _ in range(int(10. / DT_MDL)):
-      self.scc_m.update(True, False, 0., 0., 0.)
+      self.scc_m.update(self.sm, True, False, 0., 0., 0.)
     assert self.scc_m.state == VisionState.enabled
 
   def test_moderate_curve(self):
@@ -84,11 +85,10 @@ class TestSmartCruiseControlMap(OpenpilotTestCase):
     # making max_d ~11x too small so the moderate-curve branch never tripped.
     # v_ego=25, a_ego=0, tv=24: fixed max_d≈45m vs buggy ≈4m at a 40m waypoint.
     waypoint_lon_deg = (40.0 / R) * (180.0 / math.pi)
-    self.mem_params.put("LastGPSPosition", json.dumps({"latitude": 0.0, "longitude": 0.0}), block=True)
     self.mem_params.put("MapTargetVelocities",
                         json.dumps([{"latitude": 0.0, "longitude": waypoint_lon_deg, "velocity": 24.0}]), block=True)
 
-    self.scc_m.update(True, False, 25.0, 0.0, 30.0)
+    self.scc_m.update(self.sm, True, False, 25.0, 0.0, 30.0)
 
     self.assertAlmostEqual(self.scc_m.v_target, 24.0, delta=24.0 * 1e-6)
 
