@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-import os
-
 import numpy as np
 import requests
 
@@ -11,6 +9,7 @@ from openpilot.common.realtime import Ratekeeper
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.navigation.helpers import latest_gps_source
 from openpilot.selfdrive.navigation.route import along_path, local_meters
+from openpilot.sunnypilot.mapd import mapbox_route
 
 REROUTE_DISTANCE = 25
 MANEUVER_TRANSITION_THRESHOLD = 10
@@ -31,6 +30,7 @@ def set_banner(instruction, banners, distance_to_maneuver):
   instruction.maneuverModifier = primary.get('modifier') or ''
   if banner.get('secondary') is not None:
     instruction.maneuverSecondaryText = banner['secondary']['text']
+  instruction.lanes = mapbox_route.banner_lanes(banner)
 
 
 class RouteEngine:
@@ -50,7 +50,7 @@ class RouteEngine:
     self.recompute_hold = 0
     self.reroute_counter = 0
 
-    self.mapbox_token = os.environ.get("MAPBOX_TOKEN")
+    self.mapbox_token = mapbox_route.read_token()
     self.api = Api(self.params.get("DongleId")) if self.mapbox_token is None else None
     self.mapbox_host = "https://api.mapbox.com" if self.mapbox_token is not None else API_HOST.rstrip('/') + '/v1/nav'
 
@@ -130,6 +130,7 @@ class RouteEngine:
         self.route = r['routes'][0]['legs'][0]['steps']
         self.route_geometry = [np.array(step['geometry']['coordinates'], dtype=np.float64).reshape((-1, 2)) for step in self.route]
         self.step_idx = 0
+        self.publish_bundle()
       else:
         cloudlog.warning("Got empty route response")
         self.clear_route()
@@ -165,6 +166,7 @@ class RouteEngine:
     future = self.route[self.step_idx + 1:]
     msg.navInstruction.distanceRemaining = step['distance'] * remaining + sum(s['distance'] for s in future)
     msg.navInstruction.timeRemaining = step['duration'] * remaining + sum(s['duration'] for s in future)
+    msg.navInstruction.allManeuvers = mapbox_route.maneuvers_ahead(self.route, self.step_idx, distance_to_maneuver_along_geometry)
 
     self.pm.send('navInstruction', msg)
 
@@ -187,7 +189,16 @@ class RouteEngine:
     msg.navRoute.coordinates = [{'longitude': lon, 'latitude': lat} for lon, lat in coords.tolist()]
     self.pm.send('navRoute', msg)
 
+  def publish_bundle(self):
+    """The route for route_guide, which turns it into the turn desire and the turn yield."""
+    try:
+      mapbox_route.publish(self.route)
+    except Exception:
+      cloudlog.exception("navd.failed_to_publish_bundle")
+
   def clear_route(self):
+    if self.route is not None:
+      mapbox_route.withdraw()
     self.route = None
     self.route_geometry = None
     self.step_idx = None

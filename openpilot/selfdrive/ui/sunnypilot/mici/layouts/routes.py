@@ -1,5 +1,6 @@
 from openpilot.cereal import messaging
 from openpilot.selfdrive.ui.mici.widgets.button import BigButton
+from openpilot.selfdrive.ui.sunnypilot.mici.widgets.destination_qr import DestinationQrDialog
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.sunnypilot.mapd import route_choice
 from openpilot.system.ui.lib.application import gui_app
@@ -24,6 +25,7 @@ class RoutesLayoutMici(NavScroller):
     self._bundle: dict | None = None
     self._sm = messaging.SubMaster(["liveLocationKalman"])
     self._here: tuple[float, float] | None = None
+    self._destination_qr = DestinationQrDialog()
     self._build()
 
   def show_event(self):
@@ -46,7 +48,9 @@ class RoutesLayoutMici(NavScroller):
   def _build(self):
     self._bundle = route_choice.load_bundle()
     trips, chosen, places = route_choice.trips(self._bundle), route_choice.chosen_route(self._bundle), route_choice.places(self._bundle)
-    items = []
+    search_btn = BigButton(tr("search"), value=tr("from your phone"))
+    search_btn.set_click_callback(lambda: gui_app.push_widget(self._destination_qr))
+    items = [search_btn]
     if chosen is not None:
       clear_btn = BigButton(tr("clear route"), value=(chosen.get("trip") or f"→ {self._place_label(chosen.get('to_place'))}").lower())
       clear_btn.set_click_callback(self._clear)

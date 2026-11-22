@@ -191,6 +191,7 @@ procs += [
   PythonProcess("mapd_logger", "openpilot.sunnypilot.mapd.mapd_logger", and_(only_onroad, mapd_ready)),
   PythonProcess("nav_channel", "openpilot.sunnypilot.mapd.nav_channel", always_run),
   PythonProcess("route_guide", "openpilot.sunnypilot.mapd.route_guide", only_onroad),
+  PythonProcess("nav_destination", "openpilot.sunnypilot.mapd.destination_web", always_run),
   PythonProcess("mapsd_local", "openpilot.sunnypilot.mapd.local_map", local_map_render),
   PythonProcess("log_archiver", "openpilot.sunnypilot.system.log_archiver", only_offroad),
 

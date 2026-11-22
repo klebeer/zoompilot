@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 import requests
 
 import openpilot.cereal.messaging as messaging
@@ -23,8 +24,16 @@ from openpilot.selfdrive.navigation.renderer import MAJOR, MEDIUM, MINOR, SIZE, 
 from openpilot.selfdrive.navigation.route import RouteTracker
 from openpilot.selfdrive.navigation.tiles import RemoteTiles
 from openpilot.selfdrive.navigation.vector_tile import decode_lines, decode_roads
+from openpilot.sunnypilot.mapd import mapbox_route
 
 METER = 1 / 111319.49079327358  # degrees of latitude
+
+
+@pytest.fixture(autouse=True)
+def scratch_nav_dir(tmp_path, monkeypatch):
+  """The bundle navd hands to route_guide goes to a scratch directory, not the nav directory of this machine."""
+  monkeypatch.setattr(mapbox_route, "BUNDLE_PATH", str(tmp_path / "nav" / "bundle.json"))
+  monkeypatch.setattr(mapbox_route, "CHOICE_PATH", str(tmp_path / "nav" / "chosen.json"))
 
 
 def draw_line(image, points, intensity, width, **kwargs):

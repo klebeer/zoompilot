@@ -25,6 +25,7 @@ from openpilot.sunnypilot.mapd import route_desire_live, route_input
 from openpilot.sunnypilot.mapd.curve_warning import LOOKAHEAD_M, distance_m
 from openpilot.sunnypilot.mapd.nav_messages import NavPublisher
 from openpilot.sunnypilot.mapd.reroute import Rerouter
+from openpilot.sunnypilot.mapd import mapbox_route
 from openpilot.sunnypilot.mapd.route_choice import BUNDLE_PATH, CHOICE_PATH, load_bundle, read_json, write_json
 from openpilot.sunnypilot.mapd.route_follower import Follower, agreed, chosen_turn, side, stamp
 from openpilot.sunnypilot.mapd.route_planner import Planner
@@ -179,8 +180,7 @@ def main() -> None:
   sm = messaging.SubMaster(["carState", "carControl", "liveLocationKalman"])
   params = Params()
   planner = Planner()
-  guide = Guide(route_desire_live.enabled(), rerouter=Rerouter(planner) if planner.available() else None)
-  nav_pub, nav_checked = None, -1e9
+  guide, mapbox, nav_pub, nav_checked = None, None, None, -1e9
   name = time.strftime("%Y-%m-%d--%H-%M-%S") + f"--{time.monotonic_ns()}.jsonl"
   out = None
   while True:
@@ -189,7 +189,15 @@ def main() -> None:
       now = time.monotonic()
       if now - nav_checked >= NAV_CHECK_S:
         nav_checked = now
-        if params.get_bool("NavigationEnabled"):
+        navigation = params.get_bool("NavigationEnabled")
+        if navigation != mapbox:
+          # comma's navigation plans with Mapbox and reroutes by itself: follow the route navd hands over, as it is
+          mapbox = navigation
+          if mapbox:
+            guide = Guide(route_desire_live.enabled(), mapbox_route.BUNDLE_PATH, mapbox_route.CHOICE_PATH)
+          else:
+            guide = Guide(route_desire_live.enabled(), rerouter=Rerouter(planner) if planner.available() else None)
+        if navigation:
           nav_pub = None
         elif nav_pub is None:
           nav_pub = NavPublisher(messaging.PubMaster(["navRoute", "navInstruction"]), messaging.new_message)
