@@ -25,6 +25,11 @@ from enum import IntEnum
 if gui_app.sunnypilot_ui():
   from openpilot.selfdrive.ui.sunnypilot.mici.onroad.hud_renderer import HudRendererSP as HudRenderer
   from openpilot.selfdrive.ui.sunnypilot.mici.onroad.long_indicator import LongIndicatorSP as LongIndicator
+  from openpilot.selfdrive.ui.sunnypilot.mici.onroad.scene_indicator import SceneIndicator
+  from openpilot.selfdrive.ui.sunnypilot.mici.onroad.speed_limit_sign import SpeedLimitSign
+  from openpilot.selfdrive.ui.sunnypilot.mici.onroad.standstill_timer import StandstillTimer
+  from openpilot.selfdrive.ui.sunnypilot.mici.onroad.status_frame import StatusFrame
+  from openpilot.selfdrive.ui.sunnypilot.mici.onroad.turn_card import TurnCard
   from openpilot.selfdrive.ui.sunnypilot.ui_state import OnroadTimerStatus
 
 OpState = log.SelfdriveState.OpenpilotState
@@ -44,6 +49,12 @@ ROAD_CAM_MIN_SPEED = 10.0  # m/s (22 mph)
 
 CAM_Y_OFFSET = 20
 LEFT_COLUMN_WIDTH = 92
+# sunnypilot side panel, top to bottom: the confidence ball's band, the scene icon, the lead car and its gap.
+# The ball's radius plus margin is 26
+PANEL_BALL_BOTTOM = 144
+PANEL_BALL_REACH = 26
+PANEL_SCENE_Y = 118
+PANEL_LEAD_OFFSET = 70
 
 
 class BookmarkIcon(Widget):
@@ -184,6 +195,12 @@ class AugmentedRoadView(CameraView):
     self._alert_renderer = AlertRenderer()
     self._driver_state_renderer = DriverStateRenderer(background=False)
     self._confidence_ball = ConfidenceBall()
+    if gui_app.sunnypilot_ui():
+      self._status_frame = StatusFrame()
+      self._speed_limit_sign = SpeedLimitSign()
+      self._standstill_timer = StandstillTimer()
+      self._turn_card = TurnCard()
+      self._scene_indicator = SceneIndicator()
     self._offroad_label = UnifiedLabel("start the car to\nuse sunnypilot", 54, FontWeight.DISPLAY,
                                        text_color=rl.Color(255, 255, 255, int(255 * 0.9)),
                                        alignment=TextAlignment.CENTER,
@@ -224,9 +241,9 @@ class AugmentedRoadView(CameraView):
     # Offroad shows the side panel in its disengaged state with text in the camera area
     if not ui_state.started:
       rl.draw_rectangle_rec(self.rect, rl.BLACK)
-      self._render_offroad_text(rl.Rectangle(self.rect.x + SIDE_PANEL_WIDTH, self.rect.y, self.rect.width - SIDE_PANEL_WIDTH, self.rect.height))
+      self._render_offroad_text(rl.Rectangle(self.rect.x, self.rect.y, self.rect.width - SIDE_PANEL_WIDTH, self.rect.height))
       self._hud_renderer.set_wheel_critical_icon(False)
-      self._render_left_panel(False)
+      self._render_side_panel(False)
       return
 
     self._switch_stream_if_needed(ui_state.sm)
@@ -236,11 +253,12 @@ class AugmentedRoadView(CameraView):
 
     alert_to_render, not_animating_out = self._alert_renderer.will_render()
     show_navigation = ui_state.navigation_enabled and ui_state.nav_destination_set and alert_to_render is None
+    # sunnypilot: the turn card over the camera takes the place of the navigation side panel
+    show_navigation = show_navigation and not gui_app.sunnypilot_ui()
 
-    # Create inner content area with border padding. Without navigation, the black side panel is on the left
-    side_panel = 0 if show_navigation else SIDE_PANEL_WIDTH
+    # Create inner content area with border padding. Without navigation, the black side panel is on the right
     self._content_rect = rl.Rectangle(
-      self.rect.x + side_panel,
+      self.rect.x,
       self.rect.y,
       self.rect.width - (PANEL_WIDTH if show_navigation else SIDE_PANEL_WIDTH),
       self.rect.height,
@@ -271,8 +289,15 @@ class AugmentedRoadView(CameraView):
                                                alert_to_render.visual_alert == car.CarControl.HUDControl.VisualAlert.steerRequired)
     self._alert_renderer.render(self._content_rect)
     self._hud_renderer.render(self._content_rect)
+    if gui_app.sunnypilot_ui():
+      top_clear = alert_to_render is None
+      self._speed_limit_sign.render(self._content_rect, top_clear)
+      # the set speed shows for a moment in the same corner
+      self._turn_card.render(self._content_rect, top_clear and not self._hud_renderer.drawing_top_icons())
+      self._standstill_timer.render(self._content_rect, top_clear, below=self._turn_card.bottom(self._content_rect) if self._turn_card.wanted else None)
 
-    if not show_navigation:
+    ball_in_panel = gui_app.sunnypilot_ui()
+    if not show_navigation and not ball_in_panel:
       self._confidence_ball.set_hidden(alert_to_render is not None and not not_animating_out)
       self._confidence_ball.render(self._content_rect)
 
@@ -282,7 +307,17 @@ class AugmentedRoadView(CameraView):
     # End clipping region
     rl.end_scissor_mode()
 
-    self._render_left_panel(show_navigation)
+    if gui_app.sunnypilot_ui():
+      self._status_frame.render(self._content_rect)
+
+    self._render_side_panel(show_navigation)
+    if not show_navigation and ball_in_panel:
+      # the ball travels at the top of the panel, on its center line
+      panel_x = self._rect.x + self._rect.width - SIDE_PANEL_WIDTH
+      self._confidence_ball.set_hidden(False)
+      self._confidence_ball.render(rl.Rectangle(panel_x, self._rect.y, SIDE_PANEL_WIDTH / 2 + PANEL_BALL_REACH,
+                                                self._rect.height - PANEL_BALL_BOTTOM))
+      self._scene_indicator.render(rl.Vector2(panel_x + SIDE_PANEL_WIDTH / 2, self._rect.y + PANEL_SCENE_Y))
 
     # Custom UI extension point - add custom overlays here
     # Use self._content_rect for positioning within camera bounds
@@ -303,26 +338,29 @@ class AugmentedRoadView(CameraView):
     self._offroad_label.render(rl.Rectangle(rect.x, y, rect.width, label_h))
     self._offroad_sublabel.render(rl.Rectangle(rect.x, y + label_h + gap, rect.width, sub_h))
 
-  def _render_left_panel(self, show_navigation: bool):
-    # DMoji, longitudinal indicator, and steering wheel are centered in the black side panel on the left,
-    # or in a column along the left edge of the camera when navigation takes the side panel
-    left_rect = rl.Rectangle(self._rect.x, self._rect.y, SIDE_PANEL_WIDTH, self._rect.height)
-    if show_navigation:
-      left_rect = rl.Rectangle(self._content_rect.x, self._content_rect.y, LEFT_COLUMN_WIDTH, self._content_rect.height)
+  def _render_side_panel(self, show_navigation: bool):
+    # DMoji, longitudinal indicator, and steering wheel are centered in the black side panel on the right,
+    # or in a column along the left edge of the camera when navigation takes the side panel.
+    # sunnypilot: the DMoji and the wheel always take that column, the panel shows what is ahead of the car
+    side_rect = rl.Rectangle(self._rect.x + self._rect.width - SIDE_PANEL_WIDTH, self._rect.y, SIDE_PANEL_WIDTH, self._rect.height)
+    over_camera = show_navigation or gui_app.sunnypilot_ui()
+    panel_rect = rl.Rectangle(self._rect.x, self._rect.y, LEFT_COLUMN_WIDTH, self._rect.height) if over_camera else side_rect
 
     # Grey out DMoji when disengaged unless AlwaysOnDM is enabled. In the side panel nothing overlaps it, otherwise it hides under the set speed
-    self._driver_state_renderer.set_should_draw(not show_navigation or not self._hud_renderer.drawing_top_icons())
+    self._driver_state_renderer.set_should_draw(not over_camera or not self._hud_renderer.drawing_top_icons())
     self._driver_state_renderer.set_dimmed(1.0 if not ui_state.started else 0.0 if ui_state.always_on_dm else status_fade.weight(UIStatus.DISENGAGED))
-    self._driver_state_renderer.set_show_under_alerts(not show_navigation)
+    self._driver_state_renderer.set_show_under_alerts(not over_camera)
     # the 52px cone is centered 36px from the top left
     dm_size = self._driver_state_renderer.rect.width
-    self._driver_state_renderer.set_position(left_rect.x + (left_rect.width - dm_size) / 2, left_rect.y + 36 - dm_size / 2)
+    self._driver_state_renderer.set_position(panel_rect.x + (panel_rect.width - dm_size) / 2, panel_rect.y + 36 - dm_size / 2)
     self._driver_state_renderer.render()
-    # sunnypilot: with navigation the column is over the camera, where the left blind spot icon draws
-    left_bsm = show_navigation and gui_app.sunnypilot_ui() and self._hud_renderer.left_blind_spot_detected()
-    self._long_indicator.set_should_draw((not show_navigation or not self._hud_renderer.drawing_top_icons()) and not left_bsm)
-    self._long_indicator.render(left_rect)
-    self._hud_renderer.render_steering_wheel(left_rect)
+    if gui_app.sunnypilot_ui():
+      self._long_indicator.set_should_draw(True)
+      self._long_indicator.render(rl.Rectangle(side_rect.x, side_rect.y + PANEL_LEAD_OFFSET, side_rect.width, side_rect.height))
+    else:
+      self._long_indicator.set_should_draw(not show_navigation or not self._hud_renderer.drawing_top_icons())
+      self._long_indicator.render(panel_rect)
+    self._hud_renderer.render_steering_wheel(panel_rect)
 
   def close(self):
     self._navigation.close()

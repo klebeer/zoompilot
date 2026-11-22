@@ -15,11 +15,13 @@ from openpilot.system.ui.widgets.scroller import NavScroller
 
 # Only params the MICI onroad path actually consumes. BlindSpot + RainbowMode render on MICI;
 # GreenLightAlert + LeadDepartAlert gate alert emission in the longitudinal planner (controls-side).
-# Toggles that only drove the TICI onroad renderers (TorqueBar, StandstillTimer, RoadNameToggle,
-# TrueVEgoUI, HideVEgoUI, ShowTurnSignals, RocketFuel, ChevronInfo, DevUIInfo) were no-ops here and
-# were removed.
+# ShowTurnSignals + StandstillTimer render on MICI through the status frame and the stopped counter.
+# Toggles that only drove the TICI onroad renderers (TorqueBar, RoadNameToggle, TrueVEgoUI, HideVEgoUI,
+# RocketFuel, ChevronInfo, DevUIInfo) were no-ops here and were removed.
 TOGGLE_PARAMS = [
   (tr("blind spot"), "BlindSpot", tr("Shows a warning on screen when a car is in your blind spot.")),
+  (tr("turn signals"), "ShowTurnSignals", tr("Blinks the side of the frame that your turn signal points to.")),
+  (tr("stopped timer"), "StandstillTimer", tr("Counts how long the car has been stopped.")),
   (tr("rainbow mode"), "RainbowMode", tr("Draws the driving path as a rainbow.\n" +
                                          "It does not change how the car drives.")),
   (tr("green light alert"), "GreenLightAlert", tr("Chimes when the light you're stopped at turns green with no car ahead.\n" +
